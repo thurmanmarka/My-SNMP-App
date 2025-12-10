@@ -1,0 +1,56 @@
+# SNMP Network Monitor Configuration
+
+# Network settings
+network:
+  # Subnet to scan (CIDR notation)
+  subnet: "192.168.86.0/24"
+  
+  # ICMP ping timeout (seconds)
+  ping_timeout: 1
+  
+  # Number of concurrent ping workers
+  ping_workers: 50
+
+# SNMP settings
+snmp:
+  # SNMP version (1, 2c, or 3)
+  version: "2c"
+  
+  # Community strings to try (in order)
+  communities:
+    - "public"
+    - "private"
+  
+  # SNMP port
+  port: 161
+  
+  # Timeout for SNMP queries (seconds)
+  timeout: 2
+  
+  # Number of retries
+  retries: 1
+
+# OIDs to query for device identification
+oids:
+  # System description
+  sysDescr: ".1.3.6.1.2.1.1.1.0"
+  
+  # System name
+  sysName: ".1.3.6.1.2.1.1.5.0"
+  
+  # System uptime
+  sysUpTime: ".1.3.6.1.2.1.1.3.0"
+  
+  # System contact
+  sysContact: ".1.3.6.1.2.1.1.4.0"
+  
+  # System location
+  sysLocation: ".1.3.6.1.2.1.1.6.0"
+
+# Output settings
+output:
+  # Path to devices database
+  devices_file: "devices.yaml"
+  
+  # Enable verbose logging
+  verbose: true
