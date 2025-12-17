@@ -45,6 +45,7 @@ func StartWebServer(config *Config, port int) error {
 	http.HandleFunc("/api/scan-status", handleAPIScanStatus)
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/health", handleHealth)
+	http.HandleFunc("/snmp/health", handleHealth)
 
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Starting web server on http://localhost%s", addr)

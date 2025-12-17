@@ -1,0 +1,24 @@
+[Unit]
+Description=My-SNMP-App - SNMP Device Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=myhomeservices
+Group=myhomeservices
+WorkingDirectory=/home/myhomeservices/snmp-app
+ExecStart=/home/myhomeservices/snmp-app/snmp-app
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=snmp-app
+
+[Install]
+WantedBy=multi-user.target
