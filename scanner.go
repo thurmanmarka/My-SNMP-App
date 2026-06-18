@@ -3,6 +3,10 @@ package main
 import (
 	"fmt"
 	"net"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,54 +79,52 @@ func ScanSubnet(subnet string, timeout time.Duration, workers int) ([]ScanResult
 	return results, nil
 }
 
-// pingHost pings a single host and returns the result
-// On Windows, falls back to TCP connection test on port 161 (SNMP)
+// pingHost pings a single host. On Windows it uses the built-in ping command
+// (no admin required); on Linux/macOS it uses the ICMP library. Both fall back
+// to TCP probes on common ports when ping fails.
 func pingHost(ip string, timeout time.Duration) ScanResult {
-	// Try ICMP first
+	if runtime.GOOS == "windows" {
+		return pingHostWindows(ip, timeout)
+	}
+
+	// ICMP via library (Linux/macOS — works without admin there)
 	pinger, err := ping.NewPinger(ip)
 	if err == nil {
 		pinger.Count = 1
 		pinger.Timeout = timeout
-		pinger.SetPrivileged(true) // Try privileged mode first
-
-		err = pinger.Run()
-		if err == nil {
-			stats := pinger.Statistics()
-			if stats.PacketsRecv > 0 {
-				return ScanResult{
-					IP:      ip,
-					IsUp:    true,
-					Latency: stats.AvgRtt,
-				}
+		pinger.SetPrivileged(true)
+		if err = pinger.Run(); err == nil {
+			if stats := pinger.Statistics(); stats.PacketsRecv > 0 {
+				return ScanResult{IP: ip, IsUp: true, Latency: stats.AvgRtt}
 			}
 		}
 	}
 
-	// Fallback: Try TCP connection to SNMP port 161
-	start := time.Now()
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:161", ip), timeout)
-	if err == nil {
-		conn.Close()
-		return ScanResult{
-			IP:      ip,
-			IsUp:    true,
-			Latency: time.Since(start),
-		}
-	}
+	return pingHostTCP(ip, timeout)
+}
 
-	// Also try common ports as a last resort
-	for _, port := range []int{80, 443, 22} {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), timeout/3)
+// pingHostWindows uses the OS ping command, which works without admin privileges.
+func pingHostWindows(ip string, timeout time.Duration) ScanResult {
+	ms := strconv.Itoa(int(timeout.Milliseconds()))
+	start := time.Now()
+	out, err := exec.Command("ping", "-n", "1", "-w", ms, ip).Output()
+	if err == nil && strings.Contains(string(out), "TTL=") {
+		return ScanResult{IP: ip, IsUp: true, Latency: time.Since(start)}
+	}
+	return pingHostTCP(ip, timeout)
+}
+
+// pingHostTCP probes common TCP ports as a last-resort host-up check.
+// Port 161 is intentionally excluded — SNMP is UDP and will never respond to TCP.
+func pingHostTCP(ip string, timeout time.Duration) ScanResult {
+	start := time.Now()
+	for _, port := range []int{80, 443, 22, 8080, 8443} {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), timeout/5)
 		if err == nil {
 			conn.Close()
-			return ScanResult{
-				IP:      ip,
-				IsUp:    true,
-				Latency: time.Since(start),
-			}
+			return ScanResult{IP: ip, IsUp: true, Latency: time.Since(start)}
 		}
 	}
-
 	return ScanResult{IP: ip, IsUp: false}
 }
 

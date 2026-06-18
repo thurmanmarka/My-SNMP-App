@@ -1,13 +1,23 @@
 let devices = [];
+let nextScanAt = null;
 
 let basePath = '';
 if (window.location.pathname.includes('/snmp')) {
     basePath = '/snmp';
 }
 
-// Load devices on page load
+// Load devices and scheduler state on page load
 loadDevices();
-setInterval(loadDevices, 5000); // Refresh every 5 seconds
+fetch(`${basePath}/api/scan-status`)
+    .then(res => res.json())
+    .then(status => {
+        if (status.next_scan && status.next_scan !== '0001-01-01T00:00:00Z') {
+            nextScanAt = new Date(status.next_scan);
+            updateNextScanCountdown();
+        }
+    });
+setInterval(loadDevices, 5000);
+setInterval(updateNextScanCountdown, 1000);
 
 function loadDevices() {
     fetch(`${basePath}/api/devices`)
@@ -26,23 +36,23 @@ function renderDeviceTable() {
         container.innerHTML = '<div class="empty-state"><h3>No devices found</h3></div>';
         return;
     }
-    let html = '<table style="width:100%;border-collapse:collapse;background:white;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.04);overflow:hidden;">';
-    html += '<thead><tr style="background:#f5f5f5;color:#333;font-size:15px;">'
-        + '<th style="padding:10px 8px;text-align:left;">IP</th>'
-        + '<th style="padding:10px 8px;text-align:left;">Hostname</th>'
-        + '<th style="padding:10px 8px;text-align:left;">Description</th>'
-        + '<th style="padding:10px 8px;text-align:left;">Location</th>'
-        + '<th style="padding:10px 8px;text-align:left;">Community</th>'
+    let html = '<table class="device-table">';
+    html += '<thead><tr>'
+        + '<th>IP</th>'
+        + '<th>Hostname</th>'
+        + '<th>Description</th>'
+        + '<th>Location</th>'
+        + '<th>Community</th>'
         + '</tr></thead><tbody>';
     devices.forEach(device => {
         const ip = device.ip || device.IP;
         if (!device || typeof ip !== 'string' || !ip.match(/^\d+\.\d+\.\d+\.\d+$/)) return;
-        html += '<tr style="border-bottom:1px solid #eee;">'
-            + `<td style="padding:8px 8px;color:#667eea;font-weight:bold;">${ip}</td>`
-            + `<td style="padding:8px 8px;">${device.hostname || device.Hostname || ''}</td>`
-            + `<td style="padding:8px 8px;">${device.description || device.Description || ''}</td>`
-            + `<td style="padding:8px 8px;">${device.location || device.Location || ''}</td>`
-            + `<td style="padding:8px 8px;">${device.community || device.Community || ''}</td>`
+        html += '<tr>'
+            + `<td class="ip-cell">${ip}</td>`
+            + `<td>${device.hostname || device.Hostname || ''}</td>`
+            + `<td>${device.description || device.Description || ''}</td>`
+            + `<td>${device.location || device.Location || ''}</td>`
+            + `<td>${device.community || device.Community || ''}</td>`
             + '</tr>';
     });
     html += '</tbody></table>';
@@ -51,10 +61,32 @@ function renderDeviceTable() {
 
 function updateStats(data) {
     document.getElementById('deviceCount').textContent = data.device_count || 0;
-    
+
     if (data.last_scan && data.last_scan !== '0001-01-01T00:00:00Z') {
         const lastScan = new Date(data.last_scan);
         document.getElementById('lastScan').textContent = lastScan.toLocaleTimeString();
+    }
+}
+
+function updateNextScanCountdown() {
+    const el = document.getElementById('nextScan');
+    if (!nextScanAt || nextScanAt <= new Date()) {
+        return;
+    }
+    const secsLeft = Math.round((nextScanAt - new Date()) / 1000);
+    if (secsLeft <= 0) {
+        el.textContent = 'Soon';
+        return;
+    }
+    const h = Math.floor(secsLeft / 3600);
+    const m = Math.floor((secsLeft % 3600) / 60);
+    const s = secsLeft % 60;
+    if (h > 0) {
+        el.textContent = `${h}h ${m}m`;
+    } else if (m > 0) {
+        el.textContent = `${m}m ${s}s`;
+    } else {
+        el.textContent = `${s}s`;
     }
 }
 
@@ -149,7 +181,10 @@ function startScan() {
         fetch(`${basePath}/api/scan-status`)
             .then(res => res.json())
             .then(status => {
-                console.log('Scan status:', status);
+                if (status.next_scan && status.next_scan !== '0001-01-01T00:00:00Z') {
+                    nextScanAt = new Date(status.next_scan);
+                    updateNextScanCountdown();
+                }
                 if (status && status.running) {
                     let percent = status.total > 0 ? Math.round((status.progress / status.total) * 100) : 0;
                     progressBar.style.width = percent + '%';

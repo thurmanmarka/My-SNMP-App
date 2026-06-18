@@ -106,5 +106,9 @@ func getSNMPValue(client *gosnmp.GoSNMP, oid string) (string, error) {
 		return "", fmt.Errorf("no response")
 	}
 
-	return fmt.Sprintf("%s", result.Variables[0].Value), nil
+	v := result.Variables[0].Value
+	if b, ok := v.([]byte); ok {
+		return string(b), nil
+	}
+	return fmt.Sprintf("%v", v), nil
 }

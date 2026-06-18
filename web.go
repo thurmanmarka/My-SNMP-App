@@ -18,6 +18,9 @@ var (
 
 	scanStatusMutex sync.RWMutex
 	scanStatus      ScanStatus
+
+	nextScanMutex sync.RWMutex
+	nextScanTime  time.Time
 )
 
 type ScanStatus struct {
@@ -37,6 +40,9 @@ func StartWebServer(config *Config, port int) error {
 		return fmt.Errorf("failed to load devices: %w", err)
 	}
 	deviceCache = db
+
+	// Start automatic scan scheduler
+	go startScheduler(config)
 
 	// Routes
 	http.HandleFunc("/", handleIndex)
@@ -90,125 +96,13 @@ func handleAPIScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run scan in background
-	go func() {
-		config, err := LoadConfig("config.yaml")
-		if err != nil {
-			log.Printf("Failed to load config: %v", err)
-			return
-		}
+	config, err := LoadConfig("config.yaml")
+	if err != nil {
+		http.Error(w, "Failed to load config", http.StatusInternalServerError)
+		return
+	}
 
-		scanStatusMutex.Lock()
-		scanStatus = ScanStatus{
-			Running:   true,
-			Progress:  0,
-			Total:     0,
-			Message:   "Starting network scan...",
-			StartedAt: time.Now(),
-		}
-		scanStatusMutex.Unlock()
-
-		// Scan subnet
-		results, err := ScanSubnet(
-			config.Network.Subnet,
-			config.GetPingTimeout(),
-			config.Network.PingWorkers,
-		)
-		if err != nil {
-			scanStatusMutex.Lock()
-			scanStatus.Running = false
-			scanStatus.Message = "Scan failed"
-			scanStatus.FinishedAt = time.Now()
-			scanStatusMutex.Unlock()
-			log.Printf("Scan failed: %v", err)
-			return
-		}
-
-		// Filter alive hosts
-		var aliveHosts []ScanResult
-		for _, result := range results {
-			if result.IsUp {
-				aliveHosts = append(aliveHosts, result)
-			}
-		}
-
-		scanStatusMutex.Lock()
-		scanStatus.Message = fmt.Sprintf("Found %d live hosts", len(aliveHosts))
-		scanStatus.Total = len(aliveHosts)
-		scanStatus.Progress = 0
-		scanStatusMutex.Unlock()
-
-		// Load existing devices
-		devicesDB, err := LoadDevices(config.Output.DevicesFile)
-		if err != nil {
-			scanStatusMutex.Lock()
-			scanStatus.Running = false
-			scanStatus.Message = "Failed to load devices"
-			scanStatus.FinishedAt = time.Now()
-			scanStatusMutex.Unlock()
-			log.Printf("Failed to load devices: %v", err)
-			return
-		}
-
-		// SNMP discovery
-		// Build list of communities: always try 'public', 'private', plus user-defined
-		var allCommunities []string
-		found := map[string]bool{}
-		for _, c := range config.SNMP.Communities {
-			if !found[c] {
-				allCommunities = append(allCommunities, c)
-				found[c] = true
-			}
-		}
-		for _, c := range []string{"public", "private"} {
-			if !found[c] {
-				allCommunities = append(allCommunities, c)
-				found[c] = true
-			}
-		}
-
-		for i, host := range aliveHosts {
-			device, err := DiscoverDevice(
-				host.IP,
-				allCommunities,
-				config.OIDs,
-				config.GetSNMPTimeout(),
-				host.Latency,
-			)
-			if err == nil {
-				devicesDB.MergeDevice(*device)
-			}
-			scanStatusMutex.Lock()
-			scanStatus.Progress = i + 1
-			scanStatus.Message = fmt.Sprintf("Scanning %d/%d devices...", scanStatus.Progress, scanStatus.Total)
-			scanStatusMutex.Unlock()
-		}
-
-		// Save devices
-		err = SaveDevices(config.Output.DevicesFile, devicesDB)
-		if err != nil {
-			scanStatusMutex.Lock()
-			scanStatus.Running = false
-			scanStatus.Message = "Failed to save devices"
-			scanStatus.FinishedAt = time.Now()
-			scanStatusMutex.Unlock()
-			log.Printf("Failed to save devices: %v", err)
-			return
-		}
-
-		// Update cache
-		deviceCacheMutex.Lock()
-		deviceCache = devicesDB
-		lastScanTime = time.Now()
-		deviceCacheMutex.Unlock()
-
-		scanStatusMutex.Lock()
-		scanStatus.Running = false
-		scanStatus.Message = "Scan complete"
-		scanStatus.FinishedAt = time.Now()
-		scanStatusMutex.Unlock()
-		log.Println("Scan complete")
-	}()
+	go runScan(config)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
@@ -216,10 +110,163 @@ func handleAPIScan(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleAPIScanStatus returns scan progress
+// runScan performs a full network scan and updates the device cache.
+func runScan(config *Config) {
+	scanStatusMutex.Lock()
+	if scanStatus.Running {
+		scanStatusMutex.Unlock()
+		return
+	}
+	scanStatus = ScanStatus{
+		Running:   true,
+		Progress:  0,
+		Total:     0,
+		Message:   "Starting network scan...",
+		StartedAt: time.Now(),
+	}
+	scanStatusMutex.Unlock()
+
+	results, err := ScanSubnet(
+		config.Network.Subnet,
+		config.GetPingTimeout(),
+		config.Network.PingWorkers,
+	)
+	if err != nil {
+		scanStatusMutex.Lock()
+		scanStatus.Running = false
+		scanStatus.Message = "Scan failed"
+		scanStatus.FinishedAt = time.Now()
+		scanStatusMutex.Unlock()
+		log.Printf("Scan failed: %v", err)
+		return
+	}
+
+	var aliveHosts []ScanResult
+	for _, result := range results {
+		if result.IsUp {
+			aliveHosts = append(aliveHosts, result)
+		}
+	}
+
+	scanStatusMutex.Lock()
+	scanStatus.Message = fmt.Sprintf("Found %d live hosts", len(aliveHosts))
+	scanStatus.Total = len(aliveHosts)
+	scanStatus.Progress = 0
+	scanStatusMutex.Unlock()
+
+	devicesDB, err := LoadDevices(config.Output.DevicesFile)
+	if err != nil {
+		scanStatusMutex.Lock()
+		scanStatus.Running = false
+		scanStatus.Message = "Failed to load devices"
+		scanStatus.FinishedAt = time.Now()
+		scanStatusMutex.Unlock()
+		log.Printf("Failed to load devices: %v", err)
+		return
+	}
+
+	var allCommunities []string
+	seen := map[string]bool{}
+	for _, c := range config.SNMP.Communities {
+		if !seen[c] {
+			allCommunities = append(allCommunities, c)
+			seen[c] = true
+		}
+	}
+	for _, c := range []string{"public", "private"} {
+		if !seen[c] {
+			allCommunities = append(allCommunities, c)
+			seen[c] = true
+		}
+	}
+
+	for i, host := range aliveHosts {
+		device, err := DiscoverDevice(
+			host.IP,
+			allCommunities,
+			config.OIDs,
+			config.GetSNMPTimeout(),
+			host.Latency,
+		)
+		if err == nil {
+			devicesDB.MergeDevice(*device)
+		}
+		scanStatusMutex.Lock()
+		scanStatus.Progress = i + 1
+		scanStatus.Message = fmt.Sprintf("Scanning %d/%d devices...", scanStatus.Progress, scanStatus.Total)
+		scanStatusMutex.Unlock()
+	}
+
+	if err := SaveDevices(config.Output.DevicesFile, devicesDB); err != nil {
+		scanStatusMutex.Lock()
+		scanStatus.Running = false
+		scanStatus.Message = "Failed to save devices"
+		scanStatus.FinishedAt = time.Now()
+		scanStatusMutex.Unlock()
+		log.Printf("Failed to save devices: %v", err)
+		return
+	}
+
+	deviceCacheMutex.Lock()
+	deviceCache = devicesDB
+	lastScanTime = time.Now()
+	deviceCacheMutex.Unlock()
+
+	scanStatusMutex.Lock()
+	scanStatus.Running = false
+	scanStatus.Message = "Scan complete"
+	scanStatus.FinishedAt = time.Now()
+	scanStatusMutex.Unlock()
+	log.Println("Scan complete")
+}
+
+// startScheduler runs periodic scans at the configured interval.
+func startScheduler(config *Config) {
+	if !config.Scheduler.Enabled {
+		return
+	}
+	interval := time.Duration(config.Scheduler.IntervalMinutes) * time.Minute
+	log.Printf("Scheduler enabled: scanning every %d minutes", config.Scheduler.IntervalMinutes)
+
+	nextScanMutex.Lock()
+	nextScanTime = time.Now().Add(interval)
+	nextScanMutex.Unlock()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		log.Println("Scheduler: starting automatic scan")
+		cfg, err := LoadConfig("config.yaml")
+		if err != nil {
+			log.Printf("Scheduler: failed to reload config: %v", err)
+			cfg = config
+		}
+		runScan(cfg)
+
+		nextScanMutex.Lock()
+		nextScanTime = time.Now().Add(interval)
+		nextScanMutex.Unlock()
+	}
+}
+
+// handleAPIScanStatus returns scan progress and next scheduled scan time
 func handleAPIScanStatus(w http.ResponseWriter, r *http.Request) {
 	scanStatusMutex.RLock()
-	defer scanStatusMutex.RUnlock()
+	status := scanStatus
+	scanStatusMutex.RUnlock()
+
+	nextScanMutex.RLock()
+	next := nextScanTime
+	nextScanMutex.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(scanStatus)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"running":     status.Running,
+		"progress":    status.Progress,
+		"total":       status.Total,
+		"message":     status.Message,
+		"started_at":  status.StartedAt,
+		"finished_at": status.FinishedAt,
+		"next_scan":   next,
+	})
 }
