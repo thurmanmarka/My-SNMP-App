@@ -21,6 +21,8 @@ var (
 
 	nextScanMutex sync.RWMutex
 	nextScanTime  time.Time
+
+	linuxPoller *LinuxPoller
 )
 
 type ScanStatus struct {
@@ -41,14 +43,17 @@ func StartWebServer(config *Config, port int) error {
 	}
 	deviceCache = db
 
-	// Start automatic scan scheduler
+	// Start automatic scan scheduler and Linux poller
 	go startScheduler(config)
+	linuxPoller = NewLinuxPoller(config)
+	go linuxPoller.Start()
 
 	// Routes
 	http.HandleFunc("/", handleIndex)
 	http.HandleFunc("/api/devices", handleAPIDevices)
 	http.HandleFunc("/api/scan", handleAPIScan)
 	http.HandleFunc("/api/scan-status", handleAPIScanStatus)
+	http.HandleFunc("/api/metrics", handleAPIMetrics)
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/snmp/health", handleHealth)
@@ -220,33 +225,57 @@ func runScan(config *Config) {
 	log.Println("Scan complete")
 }
 
-// startScheduler runs periodic scans at the configured interval.
+// startScheduler runs a network scan once per day at midnight local time.
 func startScheduler(config *Config) {
 	if !config.Scheduler.Enabled {
 		return
 	}
-	interval := time.Duration(config.Scheduler.IntervalMinutes) * time.Minute
-	log.Printf("Scheduler enabled: scanning every %d minutes", config.Scheduler.IntervalMinutes)
+	log.Println("Scheduler enabled: network scan runs daily at midnight")
 
-	nextScanMutex.Lock()
-	nextScanTime = time.Now().Add(interval)
-	nextScanMutex.Unlock()
+	for {
+		now := time.Now()
+		next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for range ticker.C {
-		log.Println("Scheduler: starting automatic scan")
+		nextScanMutex.Lock()
+		nextScanTime = next
+		nextScanMutex.Unlock()
+
+		log.Printf("Scheduler: next scan at %s", next.Format("2006-01-02 15:04:05"))
+		time.Sleep(time.Until(next))
+
+		log.Println("Scheduler: starting midnight scan")
 		cfg, err := LoadConfig("config.yaml")
 		if err != nil {
 			log.Printf("Scheduler: failed to reload config: %v", err)
 			cfg = config
 		}
 		runScan(cfg)
-
-		nextScanMutex.Lock()
-		nextScanTime = time.Now().Add(interval)
-		nextScanMutex.Unlock()
 	}
+}
+
+// handleAPIMetrics returns latest Linux metrics for all polled devices.
+// Optional query param: ?ip=x.x.x.x to filter to a single device.
+func handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if linuxPoller == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"devices": []interface{}{}})
+		return
+	}
+	if ip := r.URL.Query().Get("ip"); ip != "" {
+		m, ok := linuxPoller.GetByIP(ip)
+		if !ok {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(m)
+		return
+	}
+	all := linuxPoller.GetAll()
+	devices := make([]*LinuxMetrics, 0, len(all))
+	for _, m := range all {
+		devices = append(devices, m)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"devices": devices})
 }
 
 // handleAPIScanStatus returns scan progress and next scheduled scan time

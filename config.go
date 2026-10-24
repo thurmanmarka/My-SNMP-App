@@ -35,6 +35,12 @@ type Config struct {
 		Enabled         bool `yaml:"enabled"`
 		IntervalMinutes int  `yaml:"interval_minutes"`
 	} `yaml:"scheduler"`
+
+	Poller struct {
+		Enabled         bool   `yaml:"enabled"`
+		IntervalSeconds int    `yaml:"interval_seconds"`
+		CSVDir          string `yaml:"csv_dir"`
+	} `yaml:"poller"`
 }
 
 // LoadConfig reads and parses the YAML configuration file
@@ -67,6 +73,12 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 	if config.Scheduler.IntervalMinutes == 0 {
 		config.Scheduler.IntervalMinutes = 60
+	}
+	if config.Poller.IntervalSeconds == 0 {
+		config.Poller.IntervalSeconds = 60
+	}
+	if config.Poller.CSVDir == "" {
+		config.Poller.CSVDir = "metrics"
 	}
 
 	return &config, nil
