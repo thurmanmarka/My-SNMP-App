@@ -135,10 +135,17 @@ func (p *LinuxPoller) pollAll() {
 	}
 	wg.Wait()
 
-	if len(results) > 0 {
-		if err := writeMetricsCSV(results, p.config.Poller.CSVDir); err != nil {
-			log.Printf("Poller: CSV write error: %v", err)
+	if len(results) == 0 {
+		return
+	}
+	if dbStore != nil {
+		if err := dbStore.SaveMetrics(results); err != nil {
+			log.Printf("Poller: database write error: %v", err)
 		}
+		return
+	}
+	if err := writeMetricsCSV(results, p.config.Poller.CSVDir); err != nil {
+		log.Printf("Poller: CSV write error: %v", err)
 	}
 }
 

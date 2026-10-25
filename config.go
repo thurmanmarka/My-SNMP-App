@@ -10,6 +10,25 @@ import (
 
 // Config represents the application configuration
 type Config struct {
+	Server struct {
+		// Bind is the address to listen on. Keep 127.0.0.1 so the app is only
+		// reachable through the hub, which enforces login.
+		Bind string `yaml:"bind"`
+		Port int    `yaml:"port"`
+	} `yaml:"server"`
+
+	Database struct {
+		// When disabled, devices go to devices.yaml and metrics to CSV files
+		Enabled  bool   `yaml:"enabled"`
+		Host     string `yaml:"host"`
+		Port     int    `yaml:"port"`
+		Name     string `yaml:"name"`
+		User     string `yaml:"user"`
+		Password string `yaml:"password"`
+		// Raw 60-second metrics older than this are deleted; hourly rollups are kept
+		RetentionDays int `yaml:"retention_days"`
+	} `yaml:"database"`
+
 	Network struct {
 		Subnet      string `yaml:"subnet"`
 		PingTimeout int    `yaml:"ping_timeout"`
@@ -56,6 +75,27 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	// Set defaults if not specified
+	if config.Server.Bind == "" {
+		config.Server.Bind = "127.0.0.1"
+	}
+	if config.Server.Port == 0 {
+		config.Server.Port = 8082
+	}
+	if config.Database.Host == "" {
+		config.Database.Host = "127.0.0.1"
+	}
+	if config.Database.Port == 0 {
+		config.Database.Port = 3306
+	}
+	if config.Database.Name == "" {
+		config.Database.Name = "snmp_db"
+	}
+	if config.Database.User == "" {
+		config.Database.User = "snmp_app"
+	}
+	if config.Database.RetentionDays <= 0 {
+		config.Database.RetentionDays = 90
+	}
 	if config.Network.PingTimeout == 0 {
 		config.Network.PingTimeout = 1
 	}

@@ -34,10 +34,27 @@ type ScanStatus struct {
 	FinishedAt time.Time `json:"finished_at"`
 }
 
+// loadDevices reads the device inventory from the database, or from
+// devices.yaml when the database is disabled.
+func loadDevices(config *Config) (*DeviceDatabase, error) {
+	if dbStore != nil {
+		return dbStore.LoadDevices()
+	}
+	return LoadDevices(config.Output.DevicesFile)
+}
+
+// saveDevices writes the device inventory to the database or devices.yaml.
+func saveDevices(config *Config, db *DeviceDatabase) error {
+	if dbStore != nil {
+		return dbStore.SaveDevices(db.Devices)
+	}
+	return SaveDevices(config.Output.DevicesFile, db)
+}
+
 // StartWebServer starts the HTTP server for the web GUI
-func StartWebServer(config *Config, port int) error {
+func StartWebServer(config *Config) error {
 	// Initialize device cache
-	db, err := LoadDevices(config.Output.DevicesFile)
+	db, err := loadDevices(config)
 	if err != nil {
 		return fmt.Errorf("failed to load devices: %w", err)
 	}
@@ -58,8 +75,8 @@ func StartWebServer(config *Config, port int) error {
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/snmp/health", handleHealth)
 
-	addr := fmt.Sprintf(":%d", port)
-	log.Printf("Starting web server on http://localhost%s", addr)
+	addr := fmt.Sprintf("%s:%d", config.Server.Bind, config.Server.Port)
+	log.Printf("Starting web server on http://%s", addr)
 	return http.ListenAndServe(addr, nil)
 }
 
@@ -81,14 +98,24 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Write(content)
 }
 
-// handleAPIDevices returns the device list as JSON
+// handleAPIDevices returns the device list as JSON. Community strings are only
+// included for admins (the hub sets X-Hub-Role).
 func handleAPIDevices(w http.ResponseWriter, r *http.Request) {
 	deviceCacheMutex.RLock()
 	defer deviceCacheMutex.RUnlock()
 
+	devices := deviceCache.Devices
+	if r.Header.Get("X-Hub-Role") != "admin" {
+		devices = make([]Device, len(deviceCache.Devices))
+		copy(devices, deviceCache.Devices)
+		for i := range devices {
+			devices[i].Community = ""
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"devices":      deviceCache.Devices,
+		"devices":      devices,
 		"last_scan":    lastScanTime,
 		"device_count": len(deviceCache.Devices),
 	})
@@ -129,7 +156,28 @@ func runScan(config *Config) {
 		Message:   "Starting network scan...",
 		StartedAt: time.Now(),
 	}
+	startedAt := scanStatus.StartedAt
 	scanStatusMutex.Unlock()
+
+	// Record the scan in the database; hostsAlive and devicesFound are filled
+	// in as the scan goes so every exit path records them.
+	var scanID int64
+	var hostsAlive, devicesFound int
+	if dbStore != nil {
+		id, err := dbStore.StartScan(startedAt)
+		if err != nil {
+			log.Printf("Failed to record scan start: %v", err)
+		}
+		scanID = id
+	}
+	recordScan := func(status, message string) {
+		if dbStore == nil || scanID == 0 {
+			return
+		}
+		if err := dbStore.FinishScan(scanID, hostsAlive, devicesFound, status, message); err != nil {
+			log.Printf("Failed to record scan result: %v", err)
+		}
+	}
 
 	results, err := ScanSubnet(
 		config.Network.Subnet,
@@ -143,6 +191,7 @@ func runScan(config *Config) {
 		scanStatus.FinishedAt = time.Now()
 		scanStatusMutex.Unlock()
 		log.Printf("Scan failed: %v", err)
+		recordScan("failed", err.Error())
 		return
 	}
 
@@ -153,13 +202,15 @@ func runScan(config *Config) {
 		}
 	}
 
+	hostsAlive = len(aliveHosts)
+
 	scanStatusMutex.Lock()
 	scanStatus.Message = fmt.Sprintf("Found %d live hosts", len(aliveHosts))
 	scanStatus.Total = len(aliveHosts)
 	scanStatus.Progress = 0
 	scanStatusMutex.Unlock()
 
-	devicesDB, err := LoadDevices(config.Output.DevicesFile)
+	devicesDB, err := loadDevices(config)
 	if err != nil {
 		scanStatusMutex.Lock()
 		scanStatus.Running = false
@@ -167,6 +218,7 @@ func runScan(config *Config) {
 		scanStatus.FinishedAt = time.Now()
 		scanStatusMutex.Unlock()
 		log.Printf("Failed to load devices: %v", err)
+		recordScan("failed", "load devices: "+err.Error())
 		return
 	}
 
@@ -195,6 +247,7 @@ func runScan(config *Config) {
 		)
 		if err == nil {
 			devicesDB.MergeDevice(*device)
+			devicesFound++
 		}
 		scanStatusMutex.Lock()
 		scanStatus.Progress = i + 1
@@ -202,13 +255,14 @@ func runScan(config *Config) {
 		scanStatusMutex.Unlock()
 	}
 
-	if err := SaveDevices(config.Output.DevicesFile, devicesDB); err != nil {
+	if err := saveDevices(config, devicesDB); err != nil {
 		scanStatusMutex.Lock()
 		scanStatus.Running = false
 		scanStatus.Message = "Failed to save devices"
 		scanStatus.FinishedAt = time.Now()
 		scanStatusMutex.Unlock()
 		log.Printf("Failed to save devices: %v", err)
+		recordScan("failed", "save devices: "+err.Error())
 		return
 	}
 
@@ -223,6 +277,7 @@ func runScan(config *Config) {
 	scanStatus.FinishedAt = time.Now()
 	scanStatusMutex.Unlock()
 	log.Println("Scan complete")
+	recordScan("complete", "")
 }
 
 // startScheduler runs a network scan once per day at midnight local time.

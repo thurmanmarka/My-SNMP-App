@@ -1,5 +1,26 @@
 # SNMP Network Monitor Configuration
 
+# Web server
+server:
+  # 127.0.0.1 keeps the app reachable only through MyHomeServicesHub (which
+  # enforces login). Use 0.0.0.0 only for local testing.
+  bind: "127.0.0.1"
+  port: 8082
+
+# MariaDB storage for devices, scans and Linux metrics.
+# When disabled, devices go to devices.yaml and metrics to CSV files.
+# On first start with the database enabled, devices.yaml is imported.
+# Import old CSV metrics once with: ./snmp-app -import-csv metrics
+database:
+  enabled: true
+  host: "127.0.0.1"
+  port: 3306
+  name: "snmp_db"
+  user: "snmp_app"
+  password: "CHANGE_ME"
+  # Raw 60-second metrics older than this are deleted; hourly rollups are kept
+  retention_days: 90
+
 # Network settings
 network:
   # Subnet to scan (CIDR notation)
