@@ -7,8 +7,8 @@ Wants=mariadb.service
 Type=simple
 User=myhomeservices
 Group=myhomeservices
-WorkingDirectory=/home/myhomeservices/snmp-app
-ExecStart=/home/myhomeservices/snmp-app/snmp-app
+WorkingDirectory=/home/myhomeservices/My-SNMP-App
+ExecStart=/home/myhomeservices/My-SNMP-App/MySNMPApp
 Restart=on-failure
 RestartSec=5s
 
