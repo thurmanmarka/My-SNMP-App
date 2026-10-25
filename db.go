@@ -537,3 +537,140 @@ func (s *Store) importCSVFile(path string, cols int, query string,
 	}
 	return inserted, skipped, tx.Commit()
 }
+
+// Point is one chart sample. T is Unix milliseconds. Max is only set for
+// hourly rollups, where V is the hour's average.
+type Point struct {
+	T   int64    `json:"t"`
+	V   float64  `json:"v"`
+	Max *float64 `json:"max,omitempty"`
+}
+
+// History is a device's metrics over a time range, ready for charting.
+type History struct {
+	IP         string             `json:"ip"`
+	Resolution string             `json:"resolution"` // "raw" or "hourly"
+	From       int64              `json:"from"`
+	To         int64              `json:"to"`
+	CPU        []Point            `json:"cpu"`
+	Disks      map[string][]Point `json:"disks"` // mount path -> use %
+	DiskTotals map[string]int64   `json:"disk_totals"`
+	Temps      map[string][]Point `json:"temps"` // sensor -> °C
+}
+
+// ErrUnknownDevice is returned by History for an IP that isn't in devices.
+var ErrUnknownDevice = errors.New("unknown device")
+
+// History returns metrics for ip since the given time. Short ranges use the
+// raw 60-second rows; longer ones use the hourly rollups, which also outlive
+// the raw retention period.
+func (s *Store) History(ip string, since time.Time, hourly bool) (*History, error) {
+	var id int64
+	err := s.db.QueryRow(`SELECT id FROM devices WHERE ip = ?`, ip).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUnknownDevice
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	h := &History{
+		IP:         ip,
+		Resolution: "raw",
+		From:       since.UnixMilli(),
+		To:         time.Now().UnixMilli(),
+		CPU:        []Point{},
+		Disks:      map[string][]Point{},
+		DiskTotals: map[string]int64{},
+		Temps:      map[string][]Point{},
+	}
+	since = since.UTC()
+
+	var cpuQ, diskQ, tempQ string
+	if hourly {
+		h.Resolution = "hourly"
+		cpuQ = `SELECT hour, avg_load_pct, max_load_pct FROM metrics_cpu_hourly
+			WHERE device_id = ? AND hour >= ? ORDER BY hour`
+		diskQ = `SELECT path, hour, 100 * avg_used_bytes / NULLIF(total_bytes, 0), max_use_pct, total_bytes
+			FROM metrics_disk_hourly WHERE device_id = ? AND hour >= ? ORDER BY path, hour`
+		tempQ = `SELECT sensor, hour, avg_temp_c, max_temp_c FROM metrics_temp_hourly
+			WHERE device_id = ? AND hour >= ? ORDER BY sensor, hour`
+	} else {
+		cpuQ = `SELECT ts, avg_load_pct, NULL FROM metrics_cpu
+			WHERE device_id = ? AND ts >= ? ORDER BY ts`
+		diskQ = `SELECT path, ts, 100 * used_bytes / NULLIF(total_bytes, 0), NULL, total_bytes
+			FROM metrics_disk WHERE device_id = ? AND ts >= ? ORDER BY path, ts`
+		tempQ = `SELECT sensor, ts, temp_c, NULL FROM metrics_temp
+			WHERE device_id = ? AND ts >= ? ORDER BY sensor, ts`
+	}
+
+	point := func(t time.Time, v float64, max sql.NullFloat64) Point {
+		p := Point{T: t.UnixMilli(), V: v}
+		if max.Valid {
+			m := max.Float64
+			p.Max = &m
+		}
+		return p
+	}
+
+	rows, err := s.db.Query(cpuQ, id, since)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var t time.Time
+		var v float64
+		var max sql.NullFloat64
+		if err := rows.Scan(&t, &v, &max); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		h.CPU = append(h.CPU, point(t, v, max))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.db.Query(diskQ, id, since)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var path string
+		var t time.Time
+		var v sql.NullFloat64
+		var max sql.NullFloat64
+		var total int64
+		if err := rows.Scan(&path, &t, &v, &max, &total); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !v.Valid { // zero-size filesystem
+			continue
+		}
+		h.Disks[path] = append(h.Disks[path], point(t, v.Float64, max))
+		h.DiskTotals[path] = total
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.db.Query(tempQ, id, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sensor string
+		var t time.Time
+		var v float64
+		var max sql.NullFloat64
+		if err := rows.Scan(&sensor, &t, &v, &max); err != nil {
+			return nil, err
+		}
+		h.Temps[sensor] = append(h.Temps[sensor], point(t, v, max))
+	}
+	return h, rows.Err()
+}

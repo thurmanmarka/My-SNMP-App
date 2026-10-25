@@ -329,6 +329,160 @@
 
         .empty-state h3 { margin-bottom: 8px; color: var(--text-main); }
 
+        /* Device history charts. Charts get their own surface: the dark panel
+           colour is too light for the dark series colours to reach 3:1. */
+        .history-panel {
+            margin-bottom: 24px;
+            --chart-bg: #ffffff;
+            --ink: #1f2933;
+            --ink-2: #4b5563;
+            --ink-muted: #6b7280;
+            --grid: #eef0f4;
+            --axis: #d2d7e0;
+            --s1: #2a78d6;
+            --s2: #eb6834;
+            --s3: #1baf7a;
+            --s4: #eda100;
+            --s5: #e87ba4;
+            --s6: #008300;
+        }
+
+        [data-theme="dark"] .history-panel {
+            --chart-bg: #0f172a;
+            --ink: #f1f5f9;
+            --ink-2: #cbd5e1;
+            --ink-muted: #94a3b8;
+            --grid: #1e293b;
+            --axis: #334155;
+            --s1: #3987e5;
+            --s2: #d95926;
+            --s3: #199e70;
+            --s4: #c98500;
+            --s5: #d55181;
+            --s6: #008300;
+        }
+
+        .history-panel[hidden] { display: none; }
+
+        .history-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+
+        .history-controls select {
+            background: var(--page-bg);
+            color: var(--text-main);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 7px 10px;
+            font-size: 0.9rem;
+            max-width: 100%;
+        }
+
+        .range-group {
+            display: inline-flex;
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .range-group button {
+            background: var(--page-bg);
+            color: var(--text-muted);
+            border: none;
+            border-right: 1px solid var(--panel-border);
+            padding: 7px 12px;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+
+        .range-group button:last-child { border-right: none; }
+        .range-group button:hover { color: var(--text-main); background: var(--accent-soft); }
+        .range-group button[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+
+        .history-status { color: var(--text-muted); font-size: 0.85rem; margin-left: auto; }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            gap: 16px;
+            transition: opacity 0.2s;
+        }
+
+        .chart-grid.refreshing { opacity: 0.55; }
+
+        .chart-card {
+            background: var(--chart-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 10px;
+            padding: 16px;
+            position: relative;
+            min-width: 0;
+        }
+
+        .chart-card.wide { grid-column: 1 / -1; }
+
+        .chart-title { font-weight: 700; font-size: 0.95rem; color: var(--ink); }
+        .chart-sub { font-size: 0.8rem; color: var(--ink-muted); margin: 2px 0 8px; }
+
+        .chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px 14px;
+            font-size: 0.8rem;
+            color: var(--ink-2);
+            margin-bottom: 6px;
+        }
+
+        .key { display: inline-block; width: 14px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 6px; }
+
+        .chart-card svg { display: block; width: 100%; overflow: visible; }
+        .chart-card svg:focus { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        .chart-card svg text { fill: var(--ink-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+        .chart-card svg text.direct { fill: var(--ink-2); }
+
+        .chart-empty { color: var(--ink-muted); font-size: 0.9rem; padding: 48px 0; text-align: center; }
+
+        .chart-tip {
+            position: absolute;
+            pointer-events: none;
+            background: var(--chart-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+            padding: 8px 10px;
+            font-size: 0.8rem;
+            color: var(--ink-2);
+            white-space: nowrap;
+            z-index: 2;
+        }
+
+        .chart-tip .tip-time { color: var(--ink-muted); margin-bottom: 4px; }
+        .chart-tip .tip-row { display: flex; align-items: center; gap: 6px; }
+        .chart-tip strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+        .chart-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            margin-top: 10px;
+            color: var(--ink-2);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .chart-table th { text-align: right; font-weight: 600; color: var(--ink-muted); padding: 4px 6px; border-bottom: 1px solid var(--axis); }
+        .chart-table td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--grid); }
+        .chart-table th:first-child, .chart-table td:first-child { text-align: left; }
+        .chart-table tr.not-charted td { color: var(--ink-muted); }
+
+        @media (max-width: 600px) {
+            .chart-grid { grid-template-columns: 1fr; }
+            .history-status { margin-left: 0; width: 100%; }
+        }
+
         @media (max-width: 600px) {
             body { padding: 16px; }
             .page-shell { padding: 20px; }
@@ -365,6 +519,27 @@
             </div>
         </div>
 
+        <div class="panel history-panel" id="historyPanel" hidden>
+            <div class="panel-title">Device History</div>
+            <div class="history-controls">
+                <select id="historyDevice" aria-label="Device"></select>
+                <div class="range-group" role="group" aria-label="Time range" id="historyRange">
+                    <button type="button" data-range="6h">6h</button>
+                    <button type="button" data-range="24h">24h</button>
+                    <button type="button" data-range="7d">7d</button>
+                    <button type="button" data-range="30d">30d</button>
+                    <button type="button" data-range="90d">90d</button>
+                    <button type="button" data-range="1y">1y</button>
+                </div>
+                <span class="history-status" id="historyStatus"></span>
+            </div>
+            <div class="chart-grid" id="historyCharts">
+                <div class="chart-card" id="chartCpu"></div>
+                <div class="chart-card" id="chartTemp"></div>
+                <div class="chart-card wide" id="chartDisk"></div>
+            </div>
+        </div>
+
         <div class="panel">
             <div class="panel-title">Network Devices</div>
 
@@ -397,13 +572,12 @@
         });
     </script>
     <script>
-        var script = document.createElement('script');
-        if (window.location.pathname.includes('/snmp')) {
-            script.src = '/snmp/static/app.js';
-        } else {
-            script.src = '/static/app.js';
-        }
-        document.body.appendChild(script);
+        var staticBase = window.location.pathname.includes('/snmp') ? '/snmp/static/' : '/static/';
+        ['app.js', 'history.js'].forEach(function (name) {
+            var script = document.createElement('script');
+            script.src = staticBase + name;
+            document.body.appendChild(script);
+        });
     </script>
 </body>
 </html>

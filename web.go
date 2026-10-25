@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -71,6 +72,7 @@ func StartWebServer(config *Config) error {
 	http.HandleFunc("/api/scan", handleAPIScan)
 	http.HandleFunc("/api/scan-status", handleAPIScanStatus)
 	http.HandleFunc("/api/metrics", handleAPIMetrics)
+	http.HandleFunc("/api/metrics/history", handleAPIMetricsHistory)
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/snmp/health", handleHealth)
@@ -331,6 +333,52 @@ func handleAPIMetrics(w http.ResponseWriter, r *http.Request) {
 		devices = append(devices, m)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"devices": devices})
+}
+
+// historyRanges are the chart ranges the UI offers. Ranges up to a day use raw
+// 60-second samples; longer ones use hourly rollups.
+var historyRanges = map[string]struct {
+	d      time.Duration
+	hourly bool
+}{
+	"6h":  {6 * time.Hour, false},
+	"24h": {24 * time.Hour, false},
+	"7d":  {7 * 24 * time.Hour, true},
+	"30d": {30 * 24 * time.Hour, true},
+	"90d": {90 * 24 * time.Hour, true},
+	"1y":  {365 * 24 * time.Hour, true},
+}
+
+// handleAPIMetricsHistory returns CPU, disk and temperature history for one
+// device: /api/metrics/history?ip=x.x.x.x&range=24h
+func handleAPIMetricsHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if dbStore == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "history needs database.enabled in config.yaml"})
+		return
+	}
+	ip := r.URL.Query().Get("ip")
+	rng, ok := historyRanges[r.URL.Query().Get("range")]
+	if ip == "" || !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "need ip and range (6h, 24h, 7d, 30d, 90d, 1y)"})
+		return
+	}
+
+	h, err := dbStore.History(ip, time.Now().Add(-rng.d), rng.hourly)
+	if errors.Is(err, ErrUnknownDevice) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unknown device"})
+		return
+	}
+	if err != nil {
+		log.Printf("History query for %s failed: %v", ip, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "history query failed"})
+		return
+	}
+	json.NewEncoder(w).Encode(h)
 }
 
 // handleAPIScanStatus returns scan progress and next scheduled scan time
