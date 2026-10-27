@@ -176,9 +176,14 @@
             clients.map(c => [c.name || '—', c.ip, c.mac, c.ssid, c.band, c.mode,
                 { text: `${c.snr_db} dB`, cls: c.snr_db < WEAK_SNR_DB ? 'weak' : '' },
                 `${formatNum(c.rate_mbps, 0)} Mbps`, c.vendor]));
+        // Wi-Fi Control (admins only) has the seconds-by-seconds view and can
+        // disconnect clients; this app only reads
+        const link = el('a', 'live-link', 'Live view and disconnect clients in Wi-Fi Control →');
+        link.href = '/wifi/';
         return [
             liveSection('Radios', `as of ${at}`, radios),
             liveSection(`Connected clients (${clients.length})`, `SNR below ${WEAK_SNR_DB} dB is marked`, clientTable),
+            link,
         ];
     }
 
