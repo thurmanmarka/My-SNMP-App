@@ -17,8 +17,20 @@
     const rangeGroup = document.getElementById('historyRange');
     const statusEl = document.getElementById('historyStatus');
     const grid = document.getElementById('historyCharts');
-    // Titles for sensor units; any other unit is charted under its own name
+    const liveEl = document.getElementById('historyLive');
+    const WEAK_SNR_DB = 20; // below this a Wi-Fi client's link is marginal
+    // How each sensor unit is charted, in display order; any other unit is
+    // charted under its own name. unit is the suffix on values (default " <key>"),
+    // signed lets the axis go below zero, and rank picks which series get the
+    // colour slots when there are more than MAX_SERIES (the rest go in the table).
     const SENSOR_CHARTS = {
+        clients: { title: 'Clients per radio', sub: 'Connected Wi-Fi clients', unit: ' clients', decimals: 0 },
+        ssid_clients: { title: 'Clients per SSID', sub: 'Connected Wi-Fi clients', unit: ' clients', decimals: 0 },
+        client_mbps: { title: 'Client usage', sub: 'Mbps per client, both directions', unit: ' Mbps', rank: 'high' },
+        snr: { title: 'Client signal', sub: 'Signal-to-noise per client, dB (higher is better)', unit: ' dB', decimals: 0, rank: 'low' },
+        airtime: { title: 'Airtime', sub: '% of airtime in use per radio', unit: '%', decimals: 0 },
+        dBm: { title: 'Noise floor', sub: 'dBm per radio (lower is better)', decimals: 0, signed: true },
+        mem_free: { title: 'Memory free', sub: '% of memory free', unit: '%', decimals: 0 },
         V: { title: 'Voltage', sub: 'Volts per input' },
         A: { title: 'Port current', sub: 'Amps drawn per power port' },
         W: { title: 'Power', sub: 'Watts per sensor' },
@@ -63,6 +75,7 @@
             currentIP = ip;
             lastData = null;
             grid.replaceChildren();
+            liveEl.replaceChildren();
         }
         titleEl.textContent = name || ip;
         subEl.textContent = name ? ip : '';
@@ -79,6 +92,7 @@
         // Keep the previous charts visible, dimmed, while new data loads
         grid.classList.add('refreshing');
         const ip = currentIP, range = currentRange;
+        fetchLive(ip);
         fetch(`${base}/api/metrics/history?ip=${encodeURIComponent(ip)}&range=${range}`)
             .then(res => res.json().then(body => ({ ok: res.ok, body })))
             .then(result => {
@@ -102,11 +116,72 @@
                 if (ip !== currentIP || range !== currentRange) return; // a newer fetch owns the timer
                 grid.classList.remove('refreshing');
                 if (!dialog.open) return;
-                // Raw ranges move every minute; hourly ones every hour
-                const every = currentRange === '6h' || currentRange === '24h' ? 60e3 : 15 * 60e3;
+                // Raw ranges move every minute; hourly ones every hour, but live
+                // Wi-Fi state changes with every poll
+                const raw = currentRange === '6h' || currentRange === '24h';
+                const every = raw || liveEl.childElementCount ? 60e3 : 15 * 60e3;
                 clearTimeout(refreshTimer); // reopening mid-fetch can leave two requests for the same device
                 refreshTimer = setTimeout(() => fetchHistory(), every);
             });
+    }
+
+    // The latest poll, for live state; devices that aren't polled return 404
+    function fetchLive(ip) {
+        fetch(`${base}/api/metrics?ip=${encodeURIComponent(ip)}`)
+            .then(res => (res.ok ? res.json() : null))
+            .then(m => { if (ip === currentIP) renderLive(m); })
+            .catch(err => console.error('Live metrics fetch failed', err));
+    }
+
+    // Wi-Fi radios and connected clients. Names come from the network, so all
+    // text goes in through textContent.
+    function renderLive(m) {
+        const wifi = m && m.wifi;
+        if (!wifi) {
+            liveEl.replaceChildren();
+            return;
+        }
+        const radios = liveTable(
+            ['Radio', 'Channel', 'Width', 'Tx power', 'Noise', 'Airtime', 'Clients'],
+            wifi.radios.map(r => [r.band, r.channel, `${r.width_mhz} MHz`, `${r.tx_power_dbm} dBm`,
+                `${r.noise_dbm} dBm`, `${r.airtime_pct}%`, r.clients]));
+        const clients = wifi.clients.slice()
+            .sort((a, b) => (a.name || a.ip).localeCompare(b.name || b.ip));
+        const clientTable = liveTable(
+            ['Client', 'IP', 'MAC', 'SSID', 'Band', 'Mode', 'SNR', 'Rate', 'Vendor'],
+            clients.map(c => [c.name || '—', c.ip, c.mac, c.ssid, c.band, c.mode,
+                { text: `${c.snr_db} dB`, cls: c.snr_db < WEAK_SNR_DB ? 'weak' : '' },
+                `${formatNum(c.rate_mbps, 0)} Mbps`, c.vendor]));
+        const at = new Date(m.collected_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        liveEl.replaceChildren(
+            liveSection('Radios', `as of ${at}`, radios),
+            liveSection(`Connected clients (${clients.length})`, `SNR below ${WEAK_SNR_DB} dB is marked`, clientTable));
+    }
+
+    function liveSection(title, note, body) {
+        const section = el('div', 'live-section');
+        const head = el('div', 'live-title', title);
+        head.appendChild(el('span', '', note));
+        section.append(head, body);
+        return section;
+    }
+
+    function liveTable(headers, rows) {
+        const wrap = el('div', 'live-table-wrap');
+        const table = el('table', 'live-table');
+        const head = el('tr');
+        headers.forEach(h => head.appendChild(el('th', '', h)));
+        table.appendChild(head);
+        rows.forEach(r => {
+            const tr = el('tr');
+            r.forEach(v => {
+                const cell = v !== null && typeof v === 'object' ? v : { text: v };
+                tr.appendChild(el('td', cell.cls || '', String(cell.text === undefined ? '' : cell.text)));
+            });
+            table.appendChild(tr);
+        });
+        wrap.appendChild(table);
+        return wrap;
     }
 
     function seriesFrom(map, filter) {
@@ -164,14 +239,24 @@
         }
 
         const sensors = d.sensors || {};
-        Object.keys(sensors).sort().forEach(unit => {
-            if (unit === TRAFFIC_UNIT) return;
-            const series = seriesFrom(sensors[unit]);
-            if (!series.length) return;
+        const units = Object.keys(SENSOR_CHARTS).filter(u => sensors[u])
+            .concat(Object.keys(sensors).filter(u => !SENSOR_CHARTS[u] && u !== TRAFFIC_UNIT).sort());
+        units.forEach(unit => {
+            const all = seriesFrom(sensors[unit]);
+            if (!all.length) return;
             const label = SENSOR_CHARTS[unit] || { title: unit, sub: '' };
+            if (label.rank) {
+                const avg = s => s.points.reduce((a, p) => a + p.v, 0) / (s.points.length || 1);
+                all.sort((a, b) => label.rank === 'high' ? avg(b) - avg(a) : avg(a) - avg(b));
+            }
+            const series = all.slice(0, MAX_SERIES).sort((a, b) => a.name.localeCompare(b.name));
+            const hidden = all.slice(MAX_SERIES);
             specs.push({
-                key: `sensor-${unit}`, title: label.title, sub: label.sub,
-                series, nameSeries: true, nonNegative: true, unit: ` ${unit}`,
+                key: `sensor-${unit}`, title: label.title,
+                sub: hidden.length ? `${label.sub} · ${hidden.length} more in the table` : label.sub,
+                series, tableOnly: hidden.length ? hidden : undefined,
+                nameSeries: true, nonNegative: !label.signed,
+                unit: label.unit !== undefined ? label.unit : ` ${unit}`,
                 decimals: label.decimals !== undefined ? label.decimals : 2, hourly, win,
             });
         });
@@ -206,7 +291,7 @@
                 sub: hidden.length
                     ? `% used per filesystem · ${hidden.length} small or virtual filesystem${hidden.length > 1 ? 's' : ''} listed in the table only`
                     : '% used per filesystem',
-                series: disks, tableOnly: hidden,
+                series: disks, tableOnly: hidden, sizeColumn: true,
                 yFixed: [0, 100], unit: '%', decimals: 1, hourly, win,
             });
         }
@@ -424,7 +509,7 @@
         const head = el('tr');
         [named || opt.tableOnly ? 'Series' : '', 'Latest', 'Min', 'Avg', 'Max']
             .forEach(h => head.appendChild(el('th', '', h)));
-        if (opt.tableOnly) head.insertBefore(el('th', '', 'Size'), head.children[1]);
+        if (opt.sizeColumn) head.insertBefore(el('th', '', 'Size'), head.children[1]);
         table.appendChild(head);
 
         const rows = series.map(s => ({ s, charted: true }))
@@ -444,7 +529,7 @@
             }
             name.appendChild(document.createTextNode(named || opt.tableOnly ? s.name : opt.title));
             tr.appendChild(name);
-            if (opt.tableOnly) tr.appendChild(el('td', '', s.detail || ''));
+            if (opt.sizeColumn) tr.appendChild(el('td', '', s.detail || ''));
             [vals[vals.length - 1], Math.min(...mins), vals.reduce((a, b) => a + b, 0) / vals.length, Math.max(...maxes)]
                 .forEach(v => tr.appendChild(el('td', '', fmt(v))));
             table.appendChild(tr);

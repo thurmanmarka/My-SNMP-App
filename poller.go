@@ -38,6 +38,7 @@ type LinuxMetrics struct {
 	Disks       []DiskMetrics   `json:"disks"`
 	Temps       []TempMetrics   `json:"temps,omitempty"`
 	Sensors     []SensorMetrics `json:"sensors,omitempty"`
+	Wifi        *WifiStatus     `json:"wifi,omitempty"` // live only, not stored
 	Error       string          `json:"error,omitempty"`
 }
 
@@ -129,7 +130,7 @@ func (p *LinuxPoller) pollAll() {
 		wg        sync.WaitGroup
 	)
 	for _, d := range devices {
-		if !isLinuxDevice(d) && !isSiteMonitor(d) && !isMikroTik(d) {
+		if !isLinuxDevice(d) && !isSiteMonitor(d) && !isMikroTik(d) && !isCambium(d) {
 			continue
 		}
 		wg.Add(1)
@@ -145,6 +146,7 @@ func (p *LinuxPoller) pollAll() {
 		}(d)
 	}
 	wg.Wait()
+	pruneCounters(time.Now())
 
 	if len(results) == 0 {
 		return
@@ -193,6 +195,13 @@ func pollDevice(device Device, config *Config) *LinuxMetrics {
 		return m
 	}
 
+	if isCambium(device) {
+		if err := collectCambium(client, device.IP, m); err != nil {
+			m.Error = err.Error()
+		}
+		return m
+	}
+
 	if cpu, err := collectCPU(client); err == nil {
 		m.CPU = cpu
 	} else {
@@ -212,7 +221,7 @@ func pollDevice(device Device, config *Config) *LinuxMetrics {
 		if err != nil {
 			log.Printf("Poller %s: %v", device.IP, err)
 		}
-		traffic, err := collectTraffic(client, device.IP)
+		traffic, err := collectTraffic(client, device.IP, nil)
 		if err != nil {
 			log.Printf("Poller %s: %v", device.IP, err)
 		}

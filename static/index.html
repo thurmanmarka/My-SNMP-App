@@ -467,6 +467,39 @@
 
         .history-status { color: var(--text-muted); font-size: 0.85rem; margin-left: auto; }
 
+        /* Live Wi-Fi state above the charts */
+        .live-panel:empty { display: none; }
+        .live-panel { margin-bottom: 16px; }
+        .live-section { margin-bottom: 14px; }
+        .live-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; }
+        .live-title span { font-weight: 400; color: var(--text-muted); font-size: 0.8rem; margin-left: 6px; }
+        .live-table-wrap { overflow-x: auto; border: 1px solid var(--panel-border); border-radius: 8px; }
+
+        .live-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .live-table th {
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-muted);
+            background: var(--bg);
+            padding: 6px 10px;
+            white-space: nowrap;
+        }
+
+        .live-table td {
+            padding: 6px 10px;
+            border-top: 1px solid var(--panel-border);
+            white-space: nowrap;
+        }
+
+        .live-table td.weak { color: #d03b3b; font-weight: 600; }
+        [data-theme="dark"] .live-table td.weak { color: #f87171; }
+
         .chart-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
@@ -603,6 +636,8 @@
                     </div>
                     <span class="history-status" id="historyStatus"></span>
                 </div>
+                <!-- Live state from the latest poll (Wi-Fi radios and clients), when a device has it -->
+                <div class="live-panel" id="historyLive"></div>
                 <!-- Cards are added by history.js for the data each device reports -->
                 <div class="chart-grid" id="historyCharts"></div>
             </div>
