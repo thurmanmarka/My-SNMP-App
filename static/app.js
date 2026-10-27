@@ -1,5 +1,6 @@
 let devices = [];
 let nextScanAt = null;
+let polledIPs = new Set(); // devices with metrics, from /api/metrics
 
 let basePath = '';
 if (window.location.pathname.includes('/snmp')) {
@@ -20,20 +21,51 @@ setInterval(loadDevices, 5000);
 setInterval(updateNextScanCountdown, 1000);
 
 function loadDevices() {
-    fetch(`${basePath}/api/devices`)
-        .then(res => res.json())
-        .then(data => {
-            devices = data.devices || [];
-            updateStats(data);
-            renderDeviceTable();
-            renderDeviceTree();
-        });
+    Promise.all([
+        fetch(`${basePath}/api/devices`).then(res => res.json()),
+        fetch(`${basePath}/api/metrics`).then(res => res.json()).catch(() => ({})),
+    ]).then(([data, metrics]) => {
+        devices = data.devices || [];
+        polledIPs = new Set((metrics.devices || []).map(m => m.ip));
+        updateStats(data);
+        renderDeviceTable();
+        renderDeviceTree();
+    });
 }
+
+// Only touch the DOM when the markup changed, so the 5s refresh doesn't drop
+// keyboard focus or re-expand collapsed subnets
+const lastHTML = {};
+function setHTML(el, html) {
+    if (lastHTML[el.id] === html) return;
+    lastHTML[el.id] = html;
+    el.innerHTML = html;
+}
+
+function statsBadge(ip) {
+    return polledIPs.has(ip) ? '<span class="stats-badge">📈 Stats</span>' : '';
+}
+
+// Clicking (or Enter/Space on) a device opens its history popup (history.js)
+function onDevicePick(e) {
+    if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+    const item = e.target.closest('[data-ip]');
+    if (!item || !window.openDeviceHistory) return;
+    e.preventDefault();
+    const ip = item.dataset.ip;
+    const device = devices.find(d => (d.ip || d.IP) === ip) || {};
+    window.openDeviceHistory(ip, device.hostname || device.Hostname || '');
+}
+['deviceTableContainer', 'deviceTree'].forEach(id => {
+    const container = document.getElementById(id);
+    container.addEventListener('click', onDevicePick);
+    container.addEventListener('keydown', onDevicePick);
+});
 
 function renderDeviceTable() {
     const container = document.getElementById('deviceTableContainer');
     if (!devices || devices.length === 0) {
-        container.innerHTML = '<div class="empty-state"><h3>No devices found</h3></div>';
+        setHTML(container, '<div class="empty-state"><h3>No devices found</h3></div>');
         return;
     }
     let html = '<table class="device-table">';
@@ -47,8 +79,8 @@ function renderDeviceTable() {
     devices.forEach(device => {
         const ip = device.ip || device.IP;
         if (!device || typeof ip !== 'string' || !ip.match(/^\d+\.\d+\.\d+\.\d+$/)) return;
-        html += '<tr>'
-            + `<td class="ip-cell">${ip}</td>`
+        html += `<tr data-ip="${ip}" tabindex="0" title="Show stats for ${ip}">`
+            + `<td class="ip-cell">${ip}${statsBadge(ip)}</td>`
             + `<td>${device.hostname || device.Hostname || ''}</td>`
             + `<td>${device.description || device.Description || ''}</td>`
             + `<td>${device.location || device.Location || ''}</td>`
@@ -56,7 +88,7 @@ function renderDeviceTable() {
             + '</tr>';
     });
     html += '</tbody></table>';
-    container.innerHTML = html;
+    setHTML(container, html);
 }
 
 function updateStats(data) {
@@ -94,7 +126,7 @@ function renderDeviceTree() {
     const tree = document.getElementById('deviceTree');
     
     if (devices.length === 0) {
-        tree.innerHTML = '<div class="empty-state"><h3>No devices found</h3><p>Click "Scan Network" to discover devices</p></div>';
+        setHTML(tree, '<div class="empty-state"><h3>No devices found</h3><p>Click "Scan Network" to discover devices</p></div>');
         return;
     }
 
@@ -131,8 +163,8 @@ function renderDeviceTree() {
                         const location = device.location || device.Location;
                         const community = device.community || device.Community;
                         return `
-                        <div class="device-item">
-                            <div class="device-ip">${ip}</div>
+                        <div class="device-item" data-ip="${ip}" tabindex="0" title="Show stats for ${ip}">
+                            <div class="device-ip">${ip}${statsBadge(ip)}</div>
                             ${hostname ? `<div class="device-hostname">🏷️ ${hostname}</div>` : ''}
                             ${description ? `<div class="device-description">${description}</div>` : ''}
                             <div class="device-meta">
@@ -148,7 +180,7 @@ function renderDeviceTree() {
         `;
     });
 
-    tree.innerHTML = html;
+    setHTML(tree, html);
 }
 
 function toggleSubnet(header) {

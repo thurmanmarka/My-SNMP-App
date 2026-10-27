@@ -10,8 +10,9 @@
     // Mounts that aren't real disks
     const VIRTUAL_MOUNT = /^\/(dev|run|sys|proc|var\/run)(\/|$)|^\/tmp$/;
 
-    const panel = document.getElementById('historyPanel');
-    const select = document.getElementById('historyDevice');
+    const dialog = document.getElementById('historyDialog');
+    const titleEl = document.getElementById('historyTitle');
+    const subEl = document.getElementById('historySub');
     const rangeGroup = document.getElementById('historyRange');
     const statusEl = document.getElementById('historyStatus');
     const grid = document.getElementById('historyCharts');
@@ -21,7 +22,7 @@
         disk: document.getElementById('chartDisk'),
     };
 
-    let currentIP = load('snmpHistoryIP', '');
+    let currentIP = '';
     let currentRange = load('snmpHistoryRange', '24h');
     let lastData = null;
     let refreshTimer = null;
@@ -49,60 +50,34 @@
         return e;
     }
 
-    // ---- device list -------------------------------------------------------
+    // ---- popup -------------------------------------------------------------
 
-    function loadDeviceList() {
-        Promise.all([
-            fetch(`${base}/api/metrics`).then(r => r.json()),
-            fetch(`${base}/api/devices`).then(r => r.json()),
-        ]).then(([metrics, devs]) => {
-            const names = {};
-            (devs.devices || []).forEach(d => { names[d.IP || d.ip] = d.Hostname || d.hostname || ''; });
-            const ips = (metrics.devices || []).map(m => m.ip).filter(Boolean).sort(ipCompare);
-            if (ips.length === 0) {
-                panel.hidden = false;
-                statusEl.textContent = 'No Linux devices are being polled yet.';
-                setTimeout(loadDeviceList, 60e3);
-                return;
-            }
-            statusEl.textContent = '';
-            select.replaceChildren();
-            ips.forEach(ip => {
-                const opt = el('option', '', names[ip] ? `${names[ip]} (${ip})` : ip);
-                opt.value = ip;
-                select.appendChild(opt);
-            });
-            if (!ips.includes(currentIP)) currentIP = ips[0];
-            select.value = currentIP;
-            fetchHistory();
-        }).catch(err => console.error('History: device list failed', err));
-    }
-
-    function ipCompare(a, b) {
-        const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
-        for (let i = 0; i < 4; i++) if (pa[i] !== pb[i]) return pa[i] - pb[i];
-        return 0;
-    }
+    // Called by app.js when a device in the Network Devices list is clicked
+    window.openDeviceHistory = function (ip, name) {
+        if (ip !== currentIP) {
+            currentIP = ip;
+            lastData = null;
+            Object.values(cards).forEach(c => c.replaceChildren());
+        }
+        titleEl.textContent = name || ip;
+        subEl.textContent = name ? ip : '';
+        statusEl.textContent = 'Loading…';
+        if (!dialog.open) dialog.showModal();
+        fetchHistory();
+    };
 
     // ---- data --------------------------------------------------------------
 
     function fetchHistory() {
         clearTimeout(refreshTimer);
-        if (!currentIP) return;
+        if (!currentIP || !dialog.open) return;
         // Keep the previous charts visible, dimmed, while new data loads
         grid.classList.add('refreshing');
         const ip = currentIP, range = currentRange;
         fetch(`${base}/api/metrics/history?ip=${encodeURIComponent(ip)}&range=${range}`)
-            .then(res => {
-                if (res.status === 503) { // database disabled: no history to show
-                    panel.hidden = true;
-                    return null;
-                }
-                return res.json().then(body => ({ ok: res.ok, body }));
-            })
+            .then(res => res.json().then(body => ({ ok: res.ok, body })))
             .then(result => {
-                if (!result || ip !== currentIP || range !== currentRange) return;
-                panel.hidden = false;
+                if (ip !== currentIP || range !== currentRange) return;
                 if (!result.ok) {
                     statusEl.textContent = result.body.error || 'Could not load history';
                     lastData = null;
@@ -119,9 +94,12 @@
                 console.error('History fetch failed', err);
             })
             .finally(() => {
+                if (ip !== currentIP || range !== currentRange) return; // a newer fetch owns the timer
                 grid.classList.remove('refreshing');
+                if (!dialog.open) return;
                 // Raw ranges move every minute; hourly ones every hour
                 const every = currentRange === '6h' || currentRange === '24h' ? 60e3 : 15 * 60e3;
+                clearTimeout(refreshTimer); // reopening mid-fetch can leave two requests for the same device
                 refreshTimer = setTimeout(() => fetchHistory(), every);
             });
     }
@@ -501,19 +479,17 @@
         fetchHistory();
     });
 
-    select.addEventListener('change', () => {
-        currentIP = select.value;
-        save('snmpHistoryIP', currentIP);
-        fetchHistory();
-    });
+    document.getElementById('historyClose').addEventListener('click', () => dialog.close());
+    // Content sits in .dialog-body, so a click on the dialog itself is the backdrop
+    dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
+    dialog.addEventListener('close', () => clearTimeout(refreshTimer));
 
     let resizeTimer = null;
     window.addEventListener('resize', () => {
         clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(() => { if (lastData) renderAll(); }, 150);
+        resizeTimer = setTimeout(() => { if (lastData && dialog.open) renderAll(); }, 150);
     });
 
     // Colours are CSS variables, so the theme toggle restyles the charts without a re-render
     markRange();
-    loadDeviceList();
 })();

@@ -256,6 +256,36 @@
             font-weight: 700;
         }
 
+        .panel-hint {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin: -8px 0 16px;
+        }
+
+        /* Devices open their history popup */
+        .device-table tbody tr[data-ip],
+        .device-item[data-ip] { cursor: pointer; }
+
+        .device-table tbody tr[data-ip]:focus-visible,
+        .device-item[data-ip]:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: -2px;
+        }
+
+        .stats-badge {
+            display: inline-block;
+            margin-left: 8px;
+            padding: 1px 8px;
+            border-radius: 10px;
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-size: 0.75rem;
+            font-weight: 600;
+            vertical-align: middle;
+        }
+
+        [data-theme="dark"] .stats-badge { color: var(--text-main); }
+
         /* Tree */
         .subnet-group { margin-bottom: 16px; }
 
@@ -332,7 +362,6 @@
         /* Device history charts. Charts get their own surface: the dark panel
            colour is too light for the dark series colours to reach 3:1. */
         .history-panel {
-            margin-bottom: 24px;
             --chart-bg: #ffffff;
             --ink: #1f2933;
             --ink-2: #4b5563;
@@ -362,7 +391,50 @@
             --s6: #008300;
         }
 
-        .history-panel[hidden] { display: none; }
+        /* Device history popup. Padding lives on .dialog-body so a click whose
+           target is the dialog itself can only be a click on the backdrop. */
+        .history-dialog {
+            margin: auto;
+            width: min(1200px, calc(100vw - 32px));
+            max-height: calc(100vh - 32px);
+            padding: 0;
+            border: 1px solid var(--panel-border);
+            border-radius: 12px;
+            background: var(--panel-bg);
+            color: var(--text-main);
+            box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+        }
+
+        .history-dialog::backdrop { background: rgba(15, 23, 42, 0.55); }
+
+        body:has(.history-dialog[open]) { overflow: hidden; }
+
+        .dialog-body { padding: 24px; }
+
+        .dialog-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .dialog-head .panel-title { margin-bottom: 2px; }
+        .dialog-sub { color: var(--text-muted); font-size: 0.85rem; }
+
+        .dialog-close {
+            background: var(--page-bg);
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+            border-radius: 8px;
+            width: 34px;
+            height: 34px;
+            font-size: 1rem;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        .dialog-close:hover { border-color: var(--accent); color: var(--accent); }
 
         .history-controls {
             display: flex;
@@ -370,16 +442,6 @@
             gap: 12px;
             flex-wrap: wrap;
             margin-bottom: 16px;
-        }
-
-        .history-controls select {
-            background: var(--page-bg);
-            color: var(--text-main);
-            border: 1px solid var(--panel-border);
-            border-radius: 8px;
-            padding: 7px 10px;
-            font-size: 0.9rem;
-            max-width: 100%;
         }
 
         .range-group {
@@ -407,7 +469,7 @@
 
         .chart-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
             gap: 16px;
             transition: opacity 0.2s;
         }
@@ -481,6 +543,8 @@
         @media (max-width: 600px) {
             .chart-grid { grid-template-columns: 1fr; }
             .history-status { margin-left: 0; width: 100%; }
+            .history-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+            .dialog-body { padding: 16px; }
         }
 
         @media (max-width: 600px) {
@@ -519,28 +583,36 @@
             </div>
         </div>
 
-        <div class="panel history-panel" id="historyPanel" hidden>
-            <div class="panel-title">Device History</div>
-            <div class="history-controls">
-                <select id="historyDevice" aria-label="Device"></select>
-                <div class="range-group" role="group" aria-label="Time range" id="historyRange">
-                    <button type="button" data-range="6h">6h</button>
-                    <button type="button" data-range="24h">24h</button>
-                    <button type="button" data-range="7d">7d</button>
-                    <button type="button" data-range="30d">30d</button>
-                    <button type="button" data-range="90d">90d</button>
-                    <button type="button" data-range="1y">1y</button>
+        <dialog class="history-panel history-dialog" id="historyDialog" aria-labelledby="historyTitle">
+            <div class="dialog-body">
+                <div class="dialog-head">
+                    <div>
+                        <div class="panel-title" id="historyTitle">Device History</div>
+                        <div class="dialog-sub" id="historySub"></div>
+                    </div>
+                    <button type="button" class="dialog-close" id="historyClose" aria-label="Close">✕</button>
                 </div>
-                <span class="history-status" id="historyStatus"></span>
+                <div class="history-controls">
+                    <div class="range-group" role="group" aria-label="Time range" id="historyRange">
+                        <button type="button" data-range="6h">6h</button>
+                        <button type="button" data-range="24h">24h</button>
+                        <button type="button" data-range="7d">7d</button>
+                        <button type="button" data-range="30d">30d</button>
+                        <button type="button" data-range="90d">90d</button>
+                        <button type="button" data-range="1y">1y</button>
+                    </div>
+                    <span class="history-status" id="historyStatus"></span>
+                </div>
+                <div class="chart-grid" id="historyCharts">
+                    <div class="chart-card" id="chartCpu"></div>
+                    <div class="chart-card" id="chartTemp"></div>
+                    <div class="chart-card wide" id="chartDisk"></div>
+                </div>
             </div>
-            <div class="chart-grid" id="historyCharts">
-                <div class="chart-card" id="chartCpu"></div>
-                <div class="chart-card" id="chartTemp"></div>
-                <div class="chart-card wide" id="chartDisk"></div>
-            </div>
-        </div>
+        </dialog>
 
         <div class="panel">
+            <div class="panel-hint">Click a device to see its CPU, temperature and disk history.</div>
             <div class="panel-title">Network Devices</div>
 
             <div class="loading" id="loading">
