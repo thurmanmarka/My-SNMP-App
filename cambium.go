@@ -265,19 +265,29 @@ func firstValue(m map[string]interface{}) interface{} {
 	return m[keys[0]]
 }
 
-// sortedKeys orders table indexes numerically where they are numbers
+// sortedKeys orders table indexes numerically, part by part, so "1.2" comes
+// before "1.10"
 func sortedKeys(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		a, errA := strconv.Atoi(keys[i])
-		b, errB := strconv.Atoi(keys[j])
-		if errA == nil && errB == nil {
-			return a < b
+		a, b := strings.Split(keys[i], "."), strings.Split(keys[j], ".")
+		for n := 0; n < len(a) && n < len(b); n++ {
+			x, errX := strconv.Atoi(a[n])
+			y, errY := strconv.Atoi(b[n])
+			if errX != nil || errY != nil {
+				if a[n] != b[n] {
+					return a[n] < b[n]
+				}
+				continue
+			}
+			if x != y {
+				return x < y
+			}
 		}
-		return keys[i] < keys[j]
+		return len(a) < len(b)
 	})
 	return keys
 }

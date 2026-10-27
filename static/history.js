@@ -19,11 +19,15 @@
     const grid = document.getElementById('historyCharts');
     const liveEl = document.getElementById('historyLive');
     const WEAK_SNR_DB = 20; // below this a Wi-Fi client's link is marginal
+    const LOW_SUPPLY_PCT = 15; // about where printers start warning
     // How each sensor unit is charted, in display order; any other unit is
     // charted under its own name. unit is the suffix on values (default " <key>"),
     // signed lets the axis go below zero, and rank picks which series get the
     // colour slots when there are more than MAX_SERIES (the rest go in the table).
     const SENSOR_CHARTS = {
+        toner: { title: 'Toner', sub: '% remaining per cartridge', unit: '%', decimals: 0, yFixed: [0, 100] },
+        life: { title: 'Parts life', sub: '% life remaining per part', unit: '%', decimals: 1, yFixed: [0, 100], rank: 'low' },
+        pages: { title: 'Pages printed', sub: 'Lifetime page count', unit: ' pages', decimals: 0 },
         clients: { title: 'Clients per radio', sub: 'Connected Wi-Fi clients', unit: ' clients', decimals: 0 },
         ssid_clients: { title: 'Clients per SSID', sub: 'Connected Wi-Fi clients', unit: ' clients', decimals: 0 },
         client_mbps: { title: 'Client usage', sub: 'Mbps per client, both directions', unit: ' Mbps', rank: 'high' },
@@ -133,14 +137,34 @@
             .catch(err => console.error('Live metrics fetch failed', err));
     }
 
-    // Wi-Fi radios and connected clients. Names come from the network, so all
-    // text goes in through textContent.
+    // Live state from the latest poll: Wi-Fi radios and clients, or printer
+    // supplies. Names come from the network, so all text goes in through textContent.
     function renderLive(m) {
-        const wifi = m && m.wifi;
-        if (!wifi) {
+        if (!m || (!m.wifi && !m.printer)) {
             liveEl.replaceChildren();
             return;
         }
+        const at = new Date(m.collected_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        liveEl.replaceChildren(...(m.wifi ? wifiSections(m.wifi, at) : printerSections(m.printer, at)));
+    }
+
+    function printerSections(p, at) {
+        const supplies = liveTable(
+            ['Supply', 'Remaining', 'Detail'],
+            p.supplies.map(s => s.pct !== undefined
+                ? [s.name, { text: `${formatNum(s.pct, 0)}%`, cls: s.pct < LOW_SUPPLY_PCT ? 'weak' : '' }, s.note || '']
+                : [s.name, { text: s.note, cls: s.note === 'Empty' ? 'weak' : '' }, '']));
+        const trays = liveTable(
+            ['Tray', 'Capacity', 'Paper'],
+            p.trays.map(t => [t.name, t.capacity > 0 ? `${t.capacity} sheets` : '', t.state]));
+        const status = [p.display, `${formatNum(p.pages, 0)} pages printed`, `as of ${at}`].filter(Boolean).join(' · ');
+        return [
+            liveSection(`Status: ${p.status || 'Unknown'}`, status, supplies),
+            liveSection('Paper trays', '', trays),
+        ];
+    }
+
+    function wifiSections(wifi, at) {
         const radios = liveTable(
             ['Radio', 'Channel', 'Width', 'Tx power', 'Noise', 'Airtime', 'Clients'],
             wifi.radios.map(r => [r.band, r.channel, `${r.width_mhz} MHz`, `${r.tx_power_dbm} dBm`,
@@ -152,10 +176,10 @@
             clients.map(c => [c.name || '—', c.ip, c.mac, c.ssid, c.band, c.mode,
                 { text: `${c.snr_db} dB`, cls: c.snr_db < WEAK_SNR_DB ? 'weak' : '' },
                 `${formatNum(c.rate_mbps, 0)} Mbps`, c.vendor]));
-        const at = new Date(m.collected_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-        liveEl.replaceChildren(
+        return [
             liveSection('Radios', `as of ${at}`, radios),
-            liveSection(`Connected clients (${clients.length})`, `SNR below ${WEAK_SNR_DB} dB is marked`, clientTable));
+            liveSection(`Connected clients (${clients.length})`, `SNR below ${WEAK_SNR_DB} dB is marked`, clientTable),
+        ];
     }
 
     function liveSection(title, note, body) {
@@ -255,7 +279,7 @@
                 key: `sensor-${unit}`, title: label.title,
                 sub: hidden.length ? `${label.sub} · ${hidden.length} more in the table` : label.sub,
                 series, tableOnly: hidden.length ? hidden : undefined,
-                nameSeries: true, nonNegative: !label.signed,
+                nameSeries: true, nonNegative: !label.signed, yFixed: label.yFixed,
                 unit: label.unit !== undefined ? label.unit : ` ${unit}`,
                 decimals: label.decimals !== undefined ? label.decimals : 2, hourly, win,
             });

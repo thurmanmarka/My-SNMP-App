@@ -38,7 +38,8 @@ type LinuxMetrics struct {
 	Disks       []DiskMetrics   `json:"disks"`
 	Temps       []TempMetrics   `json:"temps,omitempty"`
 	Sensors     []SensorMetrics `json:"sensors,omitempty"`
-	Wifi        *WifiStatus     `json:"wifi,omitempty"` // live only, not stored
+	Wifi        *WifiStatus     `json:"wifi,omitempty"`    // live only, not stored
+	Printer     *PrinterStatus  `json:"printer,omitempty"` // live only, not stored
 	Error       string          `json:"error,omitempty"`
 }
 
@@ -130,7 +131,7 @@ func (p *LinuxPoller) pollAll() {
 		wg        sync.WaitGroup
 	)
 	for _, d := range devices {
-		if !isLinuxDevice(d) && !isSiteMonitor(d) && !isMikroTik(d) && !isCambium(d) {
+		if !isLinuxDevice(d) && !isSiteMonitor(d) && !isMikroTik(d) && !isCambium(d) && !isPrinter(d) {
 			continue
 		}
 		wg.Add(1)
@@ -197,6 +198,13 @@ func pollDevice(device Device, config *Config) *LinuxMetrics {
 
 	if isCambium(device) {
 		if err := collectCambium(client, device.IP, m); err != nil {
+			m.Error = err.Error()
+		}
+		return m
+	}
+
+	if isPrinter(device) {
+		if err := collectPrinter(client, m); err != nil {
 			m.Error = err.Error()
 		}
 		return m
