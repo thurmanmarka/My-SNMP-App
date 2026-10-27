@@ -155,7 +155,7 @@
         if (temps.length) {
             specs.push({
                 key: 'temp', title: 'Temperature', sub: '°C per sensor',
-                series: temps, unit: '°C', decimals: 1, hourly, win,
+                series: temps, nameSeries: true, unit: '°C', decimals: 1, hourly, win,
             });
         }
 
@@ -166,7 +166,7 @@
             const label = SENSOR_CHARTS[unit] || { title: unit, sub: '' };
             specs.push({
                 key: `sensor-${unit}`, title: label.title, sub: label.sub,
-                series, unit: ` ${unit}`, decimals: 2, hourly, win,
+                series, nameSeries: true, unit: ` ${unit}`, decimals: 2, hourly, win,
             });
         });
 
@@ -200,14 +200,15 @@
 
         const series = opt.series.slice(0, MAX_SERIES);
         series.forEach((s, i) => { s.color = `var(--s${i + 1})`; });
+        const named = seriesNamed(series, opt);
 
         if (!opt.win || series.every(s => s.points.length === 0)) {
             card.appendChild(el('div', 'chart-empty', opt.win ? 'No data in this range' : 'No history for this device'));
             return;
         }
 
-        // A legend whenever there is more than one series; one series is named by the title
-        if (series.length > 1) {
+        // A legend whenever series are named; a lone unnamed series is named by the title
+        if (named) {
             const legend = el('div', 'chart-legend');
             series.forEach(s => {
                 const item = el('span');
@@ -230,7 +231,7 @@
             labels = series.filter(s => s.points.length).map(s => {
                 const last = s.points[s.points.length - 1];
                 const value = `${formatNum(last.v, opt.decimals)}${opt.unit}`;
-                return { s, v: last.v, value, text: series.length > 1 ? `${value} ${s.name}` : value };
+                return { s, v: last.v, value, text: named ? `${value} ${s.name}` : value };
             });
         }
         const labelW = l => 22 + l.length * CHAR_W;
@@ -350,7 +351,7 @@
                     if (p.max !== undefined) value += ` · ${fmt(p.max)} max`;
                 }
                 row.append(key, el('strong', '', value));
-                if (series.length > 1) row.appendChild(document.createTextNode(s.name));
+                if (named) row.appendChild(document.createTextNode(s.name));
                 tip.appendChild(row);
             });
             tip.hidden = false;
@@ -387,11 +388,18 @@
         card.appendChild(summaryTable(series, opt));
     }
 
+    // Series carry their own names (legend, labels, table) when there are several,
+    // or when the chart asks for it: a lone "450b Retro" port isn't named by "Port current"
+    function seriesNamed(series, opt) {
+        return series.length > 1 || !!opt.nameSeries;
+    }
+
     // Latest / min / avg / max per series: the chart's values without hovering
     function summaryTable(series, opt) {
+        const named = seriesNamed(series, opt);
         const table = el('table', 'chart-table');
         const head = el('tr');
-        [series.length > 1 || opt.tableOnly ? 'Series' : '', 'Latest', 'Min', 'Avg', 'Max']
+        [named || opt.tableOnly ? 'Series' : '', 'Latest', 'Min', 'Avg', 'Max']
             .forEach(h => head.appendChild(el('th', '', h)));
         if (opt.tableOnly) head.insertBefore(el('th', '', 'Size'), head.children[1]);
         table.appendChild(head);
@@ -406,12 +414,12 @@
             const fmt = v => `${formatNum(v, opt.decimals)}${opt.unit}`;
             const tr = el('tr', charted ? '' : 'not-charted');
             const name = el('td');
-            if (charted && series.length > 1) {
+            if (charted && named) {
                 const key = el('span', 'key');
                 key.style.background = s.color;
                 name.appendChild(key);
             }
-            name.appendChild(document.createTextNode(series.length > 1 || opt.tableOnly ? s.name : opt.title));
+            name.appendChild(document.createTextNode(named || opt.tableOnly ? s.name : opt.title));
             tr.appendChild(name);
             if (opt.tableOnly) tr.appendChild(el('td', '', s.detail || ''));
             [vals[vals.length - 1], Math.min(...mins), vals.reduce((a, b) => a + b, 0) / vals.length, Math.max(...maxes)]
