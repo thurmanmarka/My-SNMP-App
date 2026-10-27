@@ -29,13 +29,16 @@ const (
 	hrStorageFixedDisk = "25.2.1.4"
 )
 
+// LinuxMetrics is one poll of a device: CPU and disks for Linux hosts,
+// temperatures and other sensors for anything that reports them.
 type LinuxMetrics struct {
-	IP          string        `json:"ip"`
-	CollectedAt time.Time     `json:"collected_at"`
-	CPU         CPUMetrics    `json:"cpu"`
-	Disks       []DiskMetrics `json:"disks"`
-	Temps       []TempMetrics `json:"temps,omitempty"`
-	Error       string        `json:"error,omitempty"`
+	IP          string          `json:"ip"`
+	CollectedAt time.Time       `json:"collected_at"`
+	CPU         CPUMetrics      `json:"cpu"`
+	Disks       []DiskMetrics   `json:"disks"`
+	Temps       []TempMetrics   `json:"temps,omitempty"`
+	Sensors     []SensorMetrics `json:"sensors,omitempty"`
+	Error       string          `json:"error,omitempty"`
 }
 
 type CPUMetrics struct {
@@ -54,6 +57,14 @@ type DiskMetrics struct {
 type TempMetrics struct {
 	Name  string  `json:"name"`
 	TempC float64 `json:"temp_c"`
+}
+
+// SensorMetrics is a named gauge reading such as a supply voltage ("V") or a
+// port's current draw ("A").
+type SensorMetrics struct {
+	Name  string  `json:"name"`
+	Unit  string  `json:"unit"`
+	Value float64 `json:"value"`
 }
 
 type LinuxPoller struct {
@@ -118,13 +129,13 @@ func (p *LinuxPoller) pollAll() {
 		wg        sync.WaitGroup
 	)
 	for _, d := range devices {
-		if !isLinuxDevice(d) {
+		if !isLinuxDevice(d) && !isSiteMonitor(d) {
 			continue
 		}
 		wg.Add(1)
 		go func(dev Device) {
 			defer wg.Done()
-			m := pollLinuxDevice(dev, p.config)
+			m := pollDevice(dev, p.config)
 			p.mu.Lock()
 			p.metrics[dev.IP] = m
 			p.mu.Unlock()
@@ -153,7 +164,7 @@ func isLinuxDevice(d Device) bool {
 	return strings.Contains(strings.ToLower(d.Description), "linux")
 }
 
-func pollLinuxDevice(device Device, config *Config) *LinuxMetrics {
+func pollDevice(device Device, config *Config) *LinuxMetrics {
 	m := &LinuxMetrics{
 		IP:          device.IP,
 		CollectedAt: time.Now(),
@@ -172,6 +183,15 @@ func pollLinuxDevice(device Device, config *Config) *LinuxMetrics {
 		return m
 	}
 	defer client.Conn.Close()
+
+	if isSiteMonitor(device) {
+		temps, sensors, err := collectSiteMonitor(client)
+		if err != nil {
+			m.Error = err.Error()
+		}
+		m.Temps, m.Sensors = temps, sensors
+		return m
+	}
 
 	if cpu, err := collectCPU(client); err == nil {
 		m.CPU = cpu
@@ -333,7 +353,7 @@ func snmpString(v interface{}) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// writeMetricsCSV appends this poll's results to the three CSV files in dir.
+// writeMetricsCSV appends this poll's results to the CSV files in dir.
 func writeMetricsCSV(results []*LinuxMetrics, dir string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create csv dir: %w", err)
@@ -376,6 +396,29 @@ func writeMetricsCSV(results []*LinuxMetrics, dir string) error {
 						strconv.FormatInt(d.UsedBytes, 10),
 						strconv.FormatInt(d.AvailBytes, 10),
 						strconv.Itoa(d.UsePct),
+					})
+				}
+			}
+		},
+	); err != nil {
+		return err
+	}
+
+	if err := appendCSV(
+		filepath.Join(dir, "metrics_sensor.csv"),
+		[]string{"timestamp", "ip", "sensor_name", "unit", "value"},
+		func(w *csv.Writer) {
+			for _, m := range results {
+				if m.Error != "" {
+					continue
+				}
+				for _, s := range m.Sensors {
+					w.Write([]string{
+						m.CollectedAt.UTC().Format(time.RFC3339),
+						m.IP,
+						s.Name,
+						s.Unit,
+						strconv.FormatFloat(s.Value, 'f', 4, 64),
 					})
 				}
 			}

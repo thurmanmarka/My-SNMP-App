@@ -1,4 +1,5 @@
-// Device history charts: CPU, temperature and disk use from /api/metrics/history.
+// Device history charts from /api/metrics/history: CPU, temperature, disk use
+// and sensor gauges (voltage, current), each shown only when the device has it.
 // Plain SVG, no chart library. Names from SNMP (mount paths, sensors) are set
 // with textContent, never innerHTML.
 (function () {
@@ -16,10 +17,10 @@
     const rangeGroup = document.getElementById('historyRange');
     const statusEl = document.getElementById('historyStatus');
     const grid = document.getElementById('historyCharts');
-    const cards = {
-        cpu: document.getElementById('chartCpu'),
-        temp: document.getElementById('chartTemp'),
-        disk: document.getElementById('chartDisk'),
+    // Titles for sensor units; any other unit is charted under its own name
+    const SENSOR_CHARTS = {
+        V: { title: 'Voltage', sub: 'Volts per input' },
+        A: { title: 'Port current', sub: 'Amps drawn per power port' },
     };
 
     let currentIP = '';
@@ -57,7 +58,7 @@
         if (ip !== currentIP) {
             currentIP = ip;
             lastData = null;
-            Object.values(cards).forEach(c => c.replaceChildren());
+            grid.replaceChildren();
         }
         titleEl.textContent = name || ip;
         subEl.textContent = name ? ip : '';
@@ -110,42 +111,84 @@
 
     function renderAll() {
         const d = lastData;
-        const hourly = d && d.resolution === 'hourly';
-        const win = d ? { from: d.from, to: d.to } : null;
-
-        renderChart(cards.cpu, {
-            title: 'CPU load',
-            sub: 'Average across all cores, %',
-            series: d && d.cpu.length ? [{ name: 'CPU', points: d.cpu }] : [],
-            yFixed: [0, 100], unit: '%', decimals: 1, hourly, win,
+        const specs = d ? chartSpecs(d) : [];
+        if (!specs.length) {
+            specs.push({ key: 'empty', wide: true, empty: d ? 'No data in this range' : 'No history for this device' });
+        }
+        // Place every card before drawing any, so widths are final when measured
+        const placed = specs.map(spec => ({ spec, card: cardFor(spec) }));
+        const keep = new Set(placed.map(p => p.card));
+        Array.from(grid.children).forEach(c => { if (!keep.has(c)) c.remove(); });
+        placed.forEach(({ spec, card }) => {
+            if (spec.empty) card.replaceChildren(el('div', 'chart-empty', spec.empty));
+            else renderChart(card, spec);
         });
+    }
 
-        renderChart(cards.temp, {
-            title: 'Temperature',
-            sub: '°C per sensor',
-            series: d ? seriesFrom(d.temps) : [],
-            unit: '°C', decimals: 1, hourly, win,
+    // Reuses the card for a chart across refreshes; appending also keeps the order
+    function cardFor(spec) {
+        let card = Array.from(grid.children).find(c => c.dataset.chart === spec.key);
+        if (!card) {
+            card = el('div', 'chart-card');
+            card.dataset.chart = spec.key;
+        }
+        card.classList.toggle('wide', !!spec.wide);
+        grid.appendChild(card);
+        return card;
+    }
+
+    // One chart per kind of data the device reported in this range
+    function chartSpecs(d) {
+        const hourly = d.resolution === 'hourly';
+        const win = { from: d.from, to: d.to };
+        const specs = [];
+
+        if (d.cpu.length) {
+            specs.push({
+                key: 'cpu', title: 'CPU load', sub: 'Average across all cores, %',
+                series: [{ name: 'CPU', points: d.cpu }],
+                yFixed: [0, 100], unit: '%', decimals: 1, hourly, win,
+            });
+        }
+
+        const temps = seriesFrom(d.temps);
+        if (temps.length) {
+            specs.push({
+                key: 'temp', title: 'Temperature', sub: '°C per sensor',
+                series: temps, unit: '°C', decimals: 1, hourly, win,
+            });
+        }
+
+        const sensors = d.sensors || {};
+        Object.keys(sensors).sort().forEach(unit => {
+            const series = seriesFrom(sensors[unit]);
+            if (!series.length) return;
+            const label = SENSOR_CHARTS[unit] || { title: unit, sub: '' };
+            specs.push({
+                key: `sensor-${unit}`, title: label.title, sub: label.sub,
+                series, unit: ` ${unit}`, decimals: 2, hourly, win,
+            });
         });
 
         // Chart the real disks, largest first; every filesystem stays in the table
-        let disks = [], hidden = [];
-        if (d) {
-            const all = seriesFrom(d.disks);
+        const all = seriesFrom(d.disks);
+        if (all.length) {
             const real = all.filter(s => !VIRTUAL_MOUNT.test(s.name))
                 .sort((a, b) => (d.disk_totals[b.name] || 0) - (d.disk_totals[a.name] || 0));
-            disks = real.slice(0, MAX_SERIES).sort((a, b) => a.name.localeCompare(b.name));
+            const disks = real.slice(0, MAX_SERIES).sort((a, b) => a.name.localeCompare(b.name));
             const charted = new Set(disks.map(s => s.name));
-            hidden = all.filter(s => !charted.has(s.name));
+            const hidden = all.filter(s => !charted.has(s.name));
             disks.concat(hidden).forEach(s => { s.detail = formatBytes(d.disk_totals[s.name]); });
+            specs.push({
+                key: 'disk', wide: true, title: 'Disk use',
+                sub: hidden.length
+                    ? `% used per filesystem · ${hidden.length} small or virtual filesystem${hidden.length > 1 ? 's' : ''} listed in the table only`
+                    : '% used per filesystem',
+                series: disks, tableOnly: hidden,
+                yFixed: [0, 100], unit: '%', decimals: 1, hourly, win,
+            });
         }
-        renderChart(cards.disk, {
-            title: 'Disk use',
-            sub: hidden.length
-                ? `% used per filesystem · ${hidden.length} small or virtual filesystem${hidden.length > 1 ? 's' : ''} listed in the table only`
-                : '% used per filesystem',
-            series: disks, tableOnly: hidden,
-            yFixed: [0, 100], unit: '%', decimals: 1, hourly, win,
-        });
+        return specs;
     }
 
     // ---- chart -------------------------------------------------------------
@@ -299,8 +342,13 @@
                 const row = el('div', 'tip-row');
                 const key = el('span', 'key');
                 key.style.background = s.color;
-                let value = `${formatNum(p.v, opt.decimals)}${opt.unit}`;
-                if (p.max !== undefined) value += ` avg · ${formatNum(p.max, opt.decimals)}${opt.unit} max`;
+                const fmt = v => `${formatNum(v, opt.decimals)}${opt.unit}`;
+                let value = fmt(p.v);
+                if (p.min !== undefined || p.max !== undefined) {
+                    value += ' avg';
+                    if (p.min !== undefined) value += ` · ${fmt(p.min)} min`;
+                    if (p.max !== undefined) value += ` · ${fmt(p.max)} max`;
+                }
                 row.append(key, el('strong', '', value));
                 if (series.length > 1) row.appendChild(document.createTextNode(s.name));
                 tip.appendChild(row);
@@ -353,6 +401,7 @@
         rows.forEach(({ s, charted }) => {
             if (!s.points.length) return;
             const vals = s.points.map(p => p.v);
+            const mins = s.points.map(p => p.min !== undefined ? p.min : p.v);
             const maxes = s.points.map(p => p.max !== undefined ? p.max : p.v);
             const fmt = v => `${formatNum(v, opt.decimals)}${opt.unit}`;
             const tr = el('tr', charted ? '' : 'not-charted');
@@ -365,7 +414,7 @@
             name.appendChild(document.createTextNode(series.length > 1 || opt.tableOnly ? s.name : opt.title));
             tr.appendChild(name);
             if (opt.tableOnly) tr.appendChild(el('td', '', s.detail || ''));
-            [vals[vals.length - 1], Math.min(...vals), vals.reduce((a, b) => a + b, 0) / vals.length, Math.max(...maxes)]
+            [vals[vals.length - 1], Math.min(...mins), vals.reduce((a, b) => a + b, 0) / vals.length, Math.max(...maxes)]
                 .forEach(v => tr.appendChild(el('td', '', fmt(v))));
             table.appendChild(tr);
         });
@@ -389,7 +438,7 @@
     function niceExtent(series) {
         let lo = Infinity, hi = -Infinity;
         series.forEach(s => s.points.forEach(p => {
-            lo = Math.min(lo, p.v);
+            lo = Math.min(lo, p.min !== undefined ? p.min : p.v);
             hi = Math.max(hi, p.max !== undefined ? p.max : p.v);
         }));
         if (lo === Infinity) return [0, 1];

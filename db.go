@@ -81,6 +81,17 @@ var schema = []string{
 		KEY idx_ts (ts),
 		FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
 	) ENGINE=InnoDB`,
+	// Other gauges (supply voltages, port currents), keyed by unit: "V", "A"
+	`CREATE TABLE IF NOT EXISTS metrics_sensor (
+		device_id INT UNSIGNED NOT NULL,
+		ts        DATETIME NOT NULL,
+		unit      VARCHAR(8)  NOT NULL,
+		sensor    VARCHAR(64) NOT NULL,
+		value     DECIMAL(14,4) NOT NULL,
+		PRIMARY KEY (device_id, unit, sensor, ts),
+		KEY idx_ts (ts),
+		FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+	) ENGINE=InnoDB`,
 	`CREATE TABLE IF NOT EXISTS poll_errors (
 		id        BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
 		device_id INT UNSIGNED NOT NULL,
@@ -120,6 +131,19 @@ var schema = []string{
 		max_temp_c DECIMAL(6,2) NOT NULL,
 		samples    INT UNSIGNED NOT NULL,
 		PRIMARY KEY (device_id, sensor, hour),
+		FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+	) ENGINE=InnoDB`,
+	// min is kept too: a battery voltage dip matters more than its peak
+	`CREATE TABLE IF NOT EXISTS metrics_sensor_hourly (
+		device_id INT UNSIGNED NOT NULL,
+		unit      VARCHAR(8)  NOT NULL,
+		sensor    VARCHAR(64) NOT NULL,
+		hour      DATETIME NOT NULL,
+		avg_value DECIMAL(14,4) NOT NULL,
+		min_value DECIMAL(14,4) NOT NULL,
+		max_value DECIMAL(14,4) NOT NULL,
+		samples   INT UNSIGNED NOT NULL,
+		PRIMARY KEY (device_id, unit, sensor, hour),
 		FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
 	) ENGINE=InnoDB`,
 }
@@ -335,6 +359,12 @@ func (s *Store) SaveMetrics(results []*LinuxMetrics) error {
 				return err
 			}
 		}
+		for _, sn := range m.Sensors {
+			if _, err := tx.Exec(`INSERT IGNORE INTO metrics_sensor (device_id, ts, unit, sensor, value)
+				VALUES (?, ?, ?, ?, ?)`, id, ts, sn.Unit, sn.Name, sn.Value); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }
@@ -361,6 +391,12 @@ var rollupQueries = []string{
 		FROM metrics_temp WHERE ts >= ? AND ts < ? GROUP BY device_id, sensor, h
 		ON DUPLICATE KEY UPDATE avg_temp_c = VALUES(avg_temp_c),
 			max_temp_c = VALUES(max_temp_c), samples = VALUES(samples)`,
+	`INSERT INTO metrics_sensor_hourly (device_id, unit, sensor, hour, avg_value, min_value, max_value, samples)
+		SELECT device_id, unit, sensor, DATE_FORMAT(ts, '%Y-%m-%d %H:00:00') AS h,
+			AVG(value), MIN(value), MAX(value), COUNT(*)
+		FROM metrics_sensor WHERE ts >= ? AND ts < ? GROUP BY device_id, unit, sensor, h
+		ON DUPLICATE KEY UPDATE avg_value = VALUES(avg_value), min_value = VALUES(min_value),
+			max_value = VALUES(max_value), samples = VALUES(samples)`,
 }
 
 // Rollup builds hourly rows for every completed hour since from.
@@ -379,7 +415,7 @@ func (s *Store) Rollup(from time.Time) error {
 // doesn't hold locks against the poller.
 func (s *Store) Prune(cutoff time.Time) (int64, error) {
 	var total int64
-	for _, table := range []string{"metrics_cpu", "metrics_disk", "metrics_temp", "poll_errors"} {
+	for _, table := range []string{"metrics_cpu", "metrics_disk", "metrics_temp", "metrics_sensor", "poll_errors"} {
 		for {
 			res, err := s.db.Exec(`DELETE FROM `+table+` WHERE ts < ? LIMIT 10000`, cutoff.UTC())
 			if err != nil {
@@ -454,6 +490,12 @@ func (s *Store) ImportCSV(dir string) error {
 			func(id int64, ts time.Time, rec []string) ([]any, error) {
 				temp, err := strconv.ParseFloat(rec[3], 64)
 				return []any{id, ts, rec[2], temp}, err
+			}},
+		{"metrics_sensor.csv", 5,
+			`INSERT IGNORE INTO metrics_sensor (device_id, ts, sensor, unit, value) VALUES (?, ?, ?, ?, ?)`,
+			func(id int64, ts time.Time, rec []string) ([]any, error) {
+				v, err := strconv.ParseFloat(rec[4], 64)
+				return []any{id, ts, rec[2], rec[3], v}, err
 			}},
 	}
 
@@ -538,11 +580,12 @@ func (s *Store) importCSVFile(path string, cols int, query string,
 	return inserted, skipped, tx.Commit()
 }
 
-// Point is one chart sample. T is Unix milliseconds. Max is only set for
-// hourly rollups, where V is the hour's average.
+// Point is one chart sample. T is Unix milliseconds. Max (and Min, for
+// sensors) are only set for hourly rollups, where V is the hour's average.
 type Point struct {
 	T   int64    `json:"t"`
 	V   float64  `json:"v"`
+	Min *float64 `json:"min,omitempty"`
 	Max *float64 `json:"max,omitempty"`
 }
 
@@ -556,6 +599,8 @@ type History struct {
 	Disks      map[string][]Point `json:"disks"` // mount path -> use %
 	DiskTotals map[string]int64   `json:"disk_totals"`
 	Temps      map[string][]Point `json:"temps"` // sensor -> °C
+	// unit ("V", "A") -> sensor -> value
+	Sensors map[string]map[string][]Point `json:"sensors"`
 }
 
 // ErrUnknownDevice is returned by History for an IP that isn't in devices.
@@ -583,10 +628,11 @@ func (s *Store) History(ip string, since time.Time, hourly bool) (*History, erro
 		Disks:      map[string][]Point{},
 		DiskTotals: map[string]int64{},
 		Temps:      map[string][]Point{},
+		Sensors:    map[string]map[string][]Point{},
 	}
 	since = since.UTC()
 
-	var cpuQ, diskQ, tempQ string
+	var cpuQ, diskQ, tempQ, sensorQ string
 	if hourly {
 		h.Resolution = "hourly"
 		cpuQ = `SELECT hour, avg_load_pct, max_load_pct FROM metrics_cpu_hourly
@@ -595,6 +641,8 @@ func (s *Store) History(ip string, since time.Time, hourly bool) (*History, erro
 			FROM metrics_disk_hourly WHERE device_id = ? AND hour >= ? ORDER BY path, hour`
 		tempQ = `SELECT sensor, hour, avg_temp_c, max_temp_c FROM metrics_temp_hourly
 			WHERE device_id = ? AND hour >= ? ORDER BY sensor, hour`
+		sensorQ = `SELECT unit, sensor, hour, avg_value, min_value, max_value FROM metrics_sensor_hourly
+			WHERE device_id = ? AND hour >= ? ORDER BY unit, sensor, hour`
 	} else {
 		cpuQ = `SELECT ts, avg_load_pct, NULL FROM metrics_cpu
 			WHERE device_id = ? AND ts >= ? ORDER BY ts`
@@ -602,6 +650,8 @@ func (s *Store) History(ip string, since time.Time, hourly bool) (*History, erro
 			FROM metrics_disk WHERE device_id = ? AND ts >= ? ORDER BY path, ts`
 		tempQ = `SELECT sensor, ts, temp_c, NULL FROM metrics_temp
 			WHERE device_id = ? AND ts >= ? ORDER BY sensor, ts`
+		sensorQ = `SELECT unit, sensor, ts, value, NULL, NULL FROM metrics_sensor
+			WHERE device_id = ? AND ts >= ? ORDER BY unit, sensor, ts`
 	}
 
 	point := func(t time.Time, v float64, max sql.NullFloat64) Point {
@@ -661,16 +711,44 @@ func (s *Store) History(ip string, since time.Time, hourly bool) (*History, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var sensor string
 		var t time.Time
 		var v float64
 		var max sql.NullFloat64
 		if err := rows.Scan(&sensor, &t, &v, &max); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		h.Temps[sensor] = append(h.Temps[sensor], point(t, v, max))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.db.Query(sensorQ, id, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var unit, sensor string
+		var t time.Time
+		var v float64
+		var min, max sql.NullFloat64
+		if err := rows.Scan(&unit, &sensor, &t, &v, &min, &max); err != nil {
+			return nil, err
+		}
+		p := point(t, v, max)
+		if min.Valid {
+			m := min.Float64
+			p.Min = &m
+		}
+		if h.Sensors[unit] == nil {
+			h.Sensors[unit] = map[string][]Point{}
+		}
+		h.Sensors[unit][sensor] = append(h.Sensors[unit][sensor], p)
 	}
 	return h, rows.Err()
 }
