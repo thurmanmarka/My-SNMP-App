@@ -129,7 +129,7 @@ func (p *LinuxPoller) pollAll() {
 		wg        sync.WaitGroup
 	)
 	for _, d := range devices {
-		if !isLinuxDevice(d) && !isSiteMonitor(d) {
+		if !isLinuxDevice(d) && !isSiteMonitor(d) && !isMikroTik(d) {
 			continue
 		}
 		wg.Add(1)
@@ -203,6 +203,21 @@ func pollDevice(device Device, config *Config) *LinuxMetrics {
 		m.Disks = disks
 	} else {
 		log.Printf("Poller %s: disk error: %v", device.IP, err)
+	}
+
+	// RouterOS has CPU and storage in HOST-RESOURCES like Linux; health and
+	// traffic are its own
+	if isMikroTik(device) {
+		temps, sensors, err := collectMikroTikHealth(client)
+		if err != nil {
+			log.Printf("Poller %s: %v", device.IP, err)
+		}
+		traffic, err := collectTraffic(client, device.IP)
+		if err != nil {
+			log.Printf("Poller %s: %v", device.IP, err)
+		}
+		m.Temps, m.Sensors = temps, append(sensors, traffic...)
+		return m
 	}
 
 	// Temperatures are optional — not all Linux devices expose lm-sensors via SNMP

@@ -21,7 +21,11 @@
     const SENSOR_CHARTS = {
         V: { title: 'Voltage', sub: 'Volts per input' },
         A: { title: 'Port current', sub: 'Amps drawn per power port' },
+        W: { title: 'Power', sub: 'Watts per sensor' },
+        RPM: { title: 'Fan speed', sub: 'RPM per fan', decimals: 0 },
     };
+    // Interface traffic arrives as sensors "<interface> in" / "<interface> out"
+    const TRAFFIC_UNIT = 'Mbps';
 
     let currentIP = '';
     let currentRange = load('snmpHistoryRange', '24h');
@@ -161,14 +165,32 @@
 
         const sensors = d.sensors || {};
         Object.keys(sensors).sort().forEach(unit => {
+            if (unit === TRAFFIC_UNIT) return;
             const series = seriesFrom(sensors[unit]);
             if (!series.length) return;
             const label = SENSOR_CHARTS[unit] || { title: unit, sub: '' };
             specs.push({
                 key: `sensor-${unit}`, title: label.title, sub: label.sub,
-                series, nameSeries: true, unit: ` ${unit}`, decimals: 2, hourly, win,
+                series, nameSeries: true, nonNegative: true, unit: ` ${unit}`,
+                decimals: label.decimals !== undefined ? label.decimals : 2, hourly, win,
             });
         });
+
+        // Router traffic goes first: one chart per interface, in and out
+        const ifaces = {};
+        Object.keys(sensors[TRAFFIC_UNIT] || {}).forEach(name => {
+            const cut = name.lastIndexOf(' ');
+            const iface = name.slice(0, cut), dir = name.slice(cut + 1);
+            if (!ifaces[iface]) ifaces[iface] = {};
+            ifaces[iface][dir] = sensors[TRAFFIC_UNIT][name];
+        });
+        const traffic = Object.keys(ifaces).sort().map(iface => ({
+            key: `traffic-${iface}`, title: iface, sub: 'Traffic, Mbps',
+            series: ['in', 'out'].filter(dir => ifaces[iface][dir])
+                .map(dir => ({ name: dir === 'in' ? 'In' : 'Out', points: ifaces[iface][dir] })),
+            nonNegative: true, unit: ` ${TRAFFIC_UNIT}`, decimals: 2, hourly, win,
+        }));
+        specs.unshift(...traffic);
 
         // Chart the real disks, largest first; every filesystem stays in the table
         const all = seriesFrom(d.disks);
@@ -247,6 +269,7 @@
         const xs = t => MARGIN.left + (t - x0) / (x1 - x0) * plotW;
 
         let [y0, y1] = opt.yFixed || niceExtent(series);
+        if (opt.nonNegative) y0 = Math.max(0, y0); // padding shouldn't invent negative traffic or RPM
         const ys = v => MARGIN.top + plotH - (v - y0) / (y1 - y0) * plotH;
 
         const svg = svgEl('svg', {
