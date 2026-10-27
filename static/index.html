@@ -468,8 +468,28 @@
         .history-status { color: var(--text-muted); font-size: 0.85rem; margin-left: auto; }
 
         /* Live Wi-Fi state above the charts */
-        .live-panel:empty { display: none; }
         .live-panel { margin-bottom: 16px; }
+        .live-panel[hidden], .live-bar[hidden], .live-link[hidden] { display: none; }
+        .live-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; font-size: 0.85rem; }
+        .live-rate { color: var(--text-muted); }
+        .live-rate select {
+            background: var(--page-bg);
+            color: var(--text-main);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: 0.85rem;
+        }
+        .live-updated { color: var(--text-muted); }
+        .live-bar .live-link { margin-left: auto; }
+        .live-table .metric { display: flex; align-items: center; gap: 8px; }
+        .live-table .metric .num { min-width: 4.8em; }
+        .live-table .metric .num.weak { color: #d03b3b; font-weight: 600; }
+        [data-theme="dark"] .live-table .metric .num.weak { color: #f87171; }
+        svg.spark { display: block; width: 90px; height: 22px; overflow: visible; }
+        svg.spark path { fill: none; stroke: var(--s1); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+        svg.spark path.weak { stroke: #d03b3b; }
+        [data-theme="dark"] svg.spark path.weak { stroke: #f87171; }
         .live-section { margin-bottom: 14px; }
         .live-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; }
         .live-title span { font-weight: 400; color: var(--text-muted); font-size: 0.8rem; margin-left: 6px; }

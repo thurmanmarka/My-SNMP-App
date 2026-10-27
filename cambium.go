@@ -49,6 +49,7 @@ type WifiStatus struct {
 }
 
 type WifiRadio struct {
+	Index      string `json:"index"` // radio table row
 	Band       string `json:"band"`
 	Channel    string `json:"channel"`
 	WidthMHz   string `json:"width_mhz"`
@@ -56,6 +57,11 @@ type WifiRadio struct {
 	NoiseDBm   int    `json:"noise_dbm"`
 	AirtimePct int    `json:"airtime_pct"`
 	Clients    int    `json:"clients"`
+	// Byte counters (32-bit); whoever reads them works out the rate
+	TxBytes uint64 `json:"tx_bytes"`
+	RxBytes uint64 `json:"rx_bytes"`
+
+	noiseOK, airtimeOK bool
 }
 
 type WifiClient struct {
@@ -68,6 +74,8 @@ type WifiClient struct {
 	Vendor   string  `json:"vendor"`
 	SNR      int     `json:"snr_db"`
 	RateMbps float64 `json:"rate_mbps"`
+	TxBytes  uint64  `json:"tx_bytes"`
+	RxBytes  uint64  `json:"rx_bytes"`
 }
 
 func isCambium(d Device) bool {
@@ -92,9 +100,38 @@ func collectCambium(client *gosnmp.GoSNMP, ip string, m *LinuxMetrics) error {
 		m.Sensors = append(m.Sensors, SensorMetrics{Name: "Memory", Unit: "mem_free", Value: float64(v)})
 	}
 
-	wifi := &WifiStatus{Radios: []WifiRadio{}, Clients: []WifiClient{}}
-	bands := collectCambiumRadios(client, ip, now, m, wifi)
-	collectCambiumClients(client, ip, now, bands, m, wifi)
+	wifi := readCambiumWifi(client)
+	for _, r := range wifi.Radios {
+		m.Sensors = append(m.Sensors, SensorMetrics{Name: r.Band, Unit: "clients", Value: float64(r.Clients)})
+		if r.noiseOK {
+			m.Sensors = append(m.Sensors, SensorMetrics{Name: r.Band, Unit: "dBm", Value: float64(r.NoiseDBm)})
+		}
+		if r.airtimeOK {
+			m.Sensors = append(m.Sensors, SensorMetrics{Name: r.Band, Unit: "airtime", Value: float64(r.AirtimePct)})
+		}
+		// Rx is what the radio received from clients: traffic into the AP
+		key := ip + "/radio/" + r.Index
+		in, inOK := counterRate(key+"/rx", r.RxBytes, now)
+		out, outOK := counterRate(key+"/tx", r.TxBytes, now)
+		if inOK && outOK {
+			m.Sensors = append(m.Sensors, trafficSensors(r.Band+" radio", in, out)...)
+		}
+	}
+
+	// Chart series are named by hostname, so the same device keeps one line
+	// as its IP changes; a repeated hostname gets the end of its MAC added
+	labels := clientLabels(wifi.Clients)
+	for i, c := range wifi.Clients {
+		label := labels[i]
+		m.Sensors = append(m.Sensors, SensorMetrics{Name: label, Unit: "snr", Value: float64(c.SNR)})
+		// Counters are keyed by MAC: the table's row numbers shift as clients come and go
+		key := ip + "/client/" + c.MAC
+		tx, txOK := counterRate(key+"/tx", c.TxBytes, now)
+		rx, rxOK := counterRate(key+"/rx", c.RxBytes, now)
+		if txOK && rxOK {
+			m.Sensors = append(m.Sensors, SensorMetrics{Name: label, Unit: "client_mbps", Value: tx + rx})
+		}
+	}
 
 	ssids, _ := walkIndexed(client, oidCnWlanSSID)
 	ssidClients, _ := walkIndexed(client, oidCnWlanClients)
@@ -114,63 +151,48 @@ func collectCambium(client *gosnmp.GoSNMP, ip string, m *LinuxMetrics) error {
 	return nil
 }
 
-// collectCambiumRadios returns the band of each radio, by radio table index.
-func collectCambiumRadios(client *gosnmp.GoSNMP, ip string, now time.Time, m *LinuxMetrics, wifi *WifiStatus) map[string]string {
+// readCambiumWifi reads the radio and client tables, byte counters included.
+// The poller and the live view share it; it has no side effects, so the live
+// view reading every few seconds doesn't disturb the poller's traffic rates.
+func readCambiumWifi(client *gosnmp.GoSNMP) *WifiStatus {
+	wifi := &WifiStatus{Radios: []WifiRadio{}, Clients: []WifiClient{}}
+
 	bandVals, _ := walkIndexed(client, oidCnRadioBand)
-	clients, _ := walkIndexed(client, oidCnRadioClients)
+	radioClients, _ := walkIndexed(client, oidCnRadioClients)
 	channels, _ := walkIndexed(client, oidCnRadioChannel)
 	widths, _ := walkIndexed(client, oidCnRadioWidth)
 	powers, _ := walkIndexed(client, oidCnRadioTxPower)
-	txBytes, _ := walkIndexed(client, oidCnRadioTxBytes)
-	rxBytes, _ := walkIndexed(client, oidCnRadioRxBytes)
+	radioTx, _ := walkIndexed(client, oidCnRadioTxBytes)
+	radioRx, _ := walkIndexed(client, oidCnRadioRxBytes)
 	noises, _ := walkIndexed(client, oidCnRadioNoise)
 	airtimes, _ := walkIndexed(client, oidCnRadioAirtime)
 
 	bands := map[string]string{}
-	idxs := sortedKeys(bandVals)
-	for _, idx := range idxs {
+	for _, idx := range sortedKeys(bandVals) {
 		band := sensorName(snmpString(bandVals[idx]))
 		if band == "" {
 			band = "Radio " + idx
 		}
 		bands[idx] = band
-
 		r := WifiRadio{
+			Index:    idx,
 			Band:     band,
 			Channel:  snmpString(channels[idx]),
 			WidthMHz: snmpString(widths[idx]),
+			TxBytes:  counterValue(radioTx[idx]),
+			RxBytes:  counterValue(radioRx[idx]),
 		}
-		r.Clients, _ = snmpInt(clients[idx])
+		r.Clients, _ = snmpInt(radioClients[idx])
 		r.TxPowerDBm, _ = snmpInt(powers[idx])
-		noise, noiseOK := atoiText(noises[idx])
-		r.NoiseDBm = noise
+		r.NoiseDBm, r.noiseOK = atoiText(noises[idx])
 		// Airtime is "total/tx/rx/busy"; the total is the radio's utilisation
-		airtime, airtimeOK := atoiText(strings.Split(snmpString(airtimes[idx]), "/")[0])
-		r.AirtimePct = airtime
+		r.AirtimePct, r.airtimeOK = atoiText(strings.Split(snmpString(airtimes[idx]), "/")[0])
 		wifi.Radios = append(wifi.Radios, r)
-
-		m.Sensors = append(m.Sensors, SensorMetrics{Name: band, Unit: "clients", Value: float64(r.Clients)})
-		if noiseOK {
-			m.Sensors = append(m.Sensors, SensorMetrics{Name: band, Unit: "dBm", Value: float64(noise)})
-		}
-		if airtimeOK {
-			m.Sensors = append(m.Sensors, SensorMetrics{Name: band, Unit: "airtime", Value: float64(airtime)})
-		}
-		// Rx is what the radio received from clients: traffic into the AP
-		key := ip + "/radio/" + idx
-		in, inOK := counterRate(key+"/rx", gosnmp.ToBigInt(rxBytes[idx]).Uint64(), now)
-		out, outOK := counterRate(key+"/tx", gosnmp.ToBigInt(txBytes[idx]).Uint64(), now)
-		if inOK && outOK {
-			m.Sensors = append(m.Sensors, trafficSensors(band+" radio", in, out)...)
-		}
 	}
-	return bands
-}
 
-func collectCambiumClients(client *gosnmp.GoSNMP, ip string, now time.Time, bands map[string]string, m *LinuxMetrics, wifi *WifiStatus) {
 	macs, err := walkIndexed(client, oidCnClientMAC)
 	if err != nil {
-		return
+		return wifi
 	}
 	ips, _ := walkIndexed(client, oidCnClientIP)
 	names, _ := walkIndexed(client, oidCnClientName)
@@ -183,15 +205,16 @@ func collectCambiumClients(client *gosnmp.GoSNMP, ip string, now time.Time, band
 	txBytes, _ := walkIndexed(client, oidCnClientTxBytes)
 	rxBytes, _ := walkIndexed(client, oidCnClientRxBytes)
 
-	var rows []string // table row of each client, for its byte counters
 	for _, idx := range sortedKeys(macs) {
 		c := WifiClient{
-			MAC:    strings.ToUpper(snmpString(macs[idx])),
-			IP:     snmpString(ips[idx]),
-			Name:   strings.TrimSpace(snmpString(names[idx])),
-			SSID:   snmpString(ssids[idx]),
-			Vendor: snmpString(vendors[idx]),
-			Mode:   snmpString(modes[idx]),
+			MAC:     strings.ToUpper(snmpString(macs[idx])),
+			IP:      snmpString(ips[idx]),
+			Name:    strings.TrimSpace(snmpString(names[idx])),
+			SSID:    snmpString(ssids[idx]),
+			Vendor:  snmpString(vendors[idx]),
+			Mode:    snmpString(modes[idx]),
+			TxBytes: counterValue(txBytes[idx]),
+			RxBytes: counterValue(rxBytes[idx]),
 		}
 		if c.MAC == "" {
 			continue
@@ -202,24 +225,15 @@ func collectCambiumClients(client *gosnmp.GoSNMP, ip string, now time.Time, band
 		c.SNR, _ = snmpInt(snrs[idx])
 		c.RateMbps, _ = strconv.ParseFloat(strings.TrimSpace(snmpString(rates[idx])), 64)
 		wifi.Clients = append(wifi.Clients, c)
-		rows = append(rows, idx)
 	}
+	return wifi
+}
 
-	// Chart series are named by hostname, so the same device keeps one line
-	// as its IP changes; a repeated hostname gets the end of its MAC added
-	labels := clientLabels(wifi.Clients)
-	for i, c := range wifi.Clients {
-		label := labels[i]
-		m.Sensors = append(m.Sensors, SensorMetrics{Name: label, Unit: "snr", Value: float64(c.SNR)})
-		// Counters are keyed by MAC: the table's row numbers shift as clients come and go
-		key := ip + "/client/" + c.MAC
-		idx := rows[i]
-		tx, txOK := counterRate(key+"/tx", gosnmp.ToBigInt(txBytes[idx]).Uint64(), now)
-		rx, rxOK := counterRate(key+"/rx", gosnmp.ToBigInt(rxBytes[idx]).Uint64(), now)
-		if txOK && rxOK {
-			m.Sensors = append(m.Sensors, SensorMetrics{Name: label, Unit: "client_mbps", Value: tx + rx})
-		}
+func counterValue(v interface{}) uint64 {
+	if v == nil {
+		return 0
 	}
+	return gosnmp.ToBigInt(v).Uint64()
 }
 
 func clientLabels(clients []WifiClient) []string {

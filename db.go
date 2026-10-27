@@ -85,7 +85,7 @@ var schema = []string{
 	`CREATE TABLE IF NOT EXISTS metrics_sensor (
 		device_id INT UNSIGNED NOT NULL,
 		ts        DATETIME NOT NULL,
-		unit      VARCHAR(8)  NOT NULL,
+		unit      VARCHAR(16) NOT NULL,
 		sensor    VARCHAR(64) NOT NULL,
 		value     DECIMAL(14,4) NOT NULL,
 		PRIMARY KEY (device_id, unit, sensor, ts),
@@ -136,7 +136,7 @@ var schema = []string{
 	// min is kept too: a battery voltage dip matters more than its peak
 	`CREATE TABLE IF NOT EXISTS metrics_sensor_hourly (
 		device_id INT UNSIGNED NOT NULL,
-		unit      VARCHAR(8)  NOT NULL,
+		unit      VARCHAR(16) NOT NULL,
 		sensor    VARCHAR(64) NOT NULL,
 		hour      DATETIME NOT NULL,
 		avg_value DECIMAL(14,4) NOT NULL,
@@ -177,7 +177,39 @@ func OpenStore(config *Config) (*Store, error) {
 			return nil, fmt.Errorf("create schema: %w", err)
 		}
 	}
+	if err := widenSensorUnits(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate sensor units: %w", err)
+	}
 	return &Store{db: db, idsByIP: map[string]int64{}}, nil
+}
+
+// widenSensorUnits fixes tables created when the unit column was VARCHAR(8),
+// which cut "ssid_clients" and "client_mbps" short. It only does work once:
+// after the ALTER the column is already wide enough.
+func widenSensorUnits(db *sql.DB) error {
+	renames := map[string]string{"ssid_cli": "ssid_clients", "client_m": "client_mbps"}
+	for _, table := range []string{"metrics_sensor", "metrics_sensor_hourly"} {
+		var width int
+		err := db.QueryRow(`SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'unit'`, table).Scan(&width)
+		if err != nil {
+			return fmt.Errorf("%s: %w", table, err)
+		}
+		if width >= 16 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE ` + table + ` MODIFY unit VARCHAR(16) NOT NULL`); err != nil {
+			return fmt.Errorf("%s: %w", table, err)
+		}
+		for short, full := range renames {
+			if _, err := db.Exec(`UPDATE `+table+` SET unit = ? WHERE unit = ?`, full, short); err != nil {
+				return fmt.Errorf("%s: %w", table, err)
+			}
+		}
+		log.Printf("Widened %s.unit to 16 characters and renamed cut-off units", table)
+	}
+	return nil
 }
 
 // deviceID returns the devices.id for ip, adding a bare row if the IP is new.

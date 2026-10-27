@@ -79,7 +79,7 @@
             currentIP = ip;
             lastData = null;
             grid.replaceChildren();
-            liveEl.replaceChildren();
+            clearLive();
         }
         titleEl.textContent = name || ip;
         subEl.textContent = name ? ip : '';
@@ -120,32 +120,224 @@
                 if (ip !== currentIP || range !== currentRange) return; // a newer fetch owns the timer
                 grid.classList.remove('refreshing');
                 if (!dialog.open) return;
-                // Raw ranges move every minute; hourly ones every hour, but live
-                // Wi-Fi state changes with every poll
+                // Raw ranges move every minute; hourly ones every hour, but a
+                // printer's live status changes with every poll (Wi-Fi has its own loop)
                 const raw = currentRange === '6h' || currentRange === '24h';
-                const every = raw || liveEl.childElementCount ? 60e3 : 15 * 60e3;
+                const every = raw || !liveEl.hidden ? 60e3 : 15 * 60e3;
                 clearTimeout(refreshTimer); // reopening mid-fetch can leave two requests for the same device
                 refreshTimer = setTimeout(() => fetchHistory(), every);
             });
     }
 
-    // The latest poll, for live state; devices that aren't polled return 404
+    // ---- live state --------------------------------------------------------
+    // Printers show their status from the latest poll. Wi-Fi APs get a fresh
+    // read from /api/live every few seconds while the popup is open and the
+    // tab is in front. Names come from the network, so all text goes in
+    // through textContent.
+
+    // The bar holds the Wi-Fi refresh control. It stays put across redraws so
+    // an open dropdown isn't replaced under the pointer.
+    const liveBar = el('div', 'live-bar');
+    const liveRate = el('select');
+    [['0', 'Paused'], ['2', 'Every 2 s'], ['3', 'Every 3 s'], ['5', 'Every 5 s'], ['10', 'Every 10 s']]
+        .forEach(([value, text]) => {
+            const o = el('option', '', text);
+            o.value = value;
+            liveRate.appendChild(o);
+        });
+    liveRate.value = load('snmpLiveRate', '3');
+    const liveRateLabel = el('label', 'live-rate', 'Refresh ');
+    liveRateLabel.appendChild(liveRate);
+    const liveUpdated = el('span', 'live-updated');
+    // Disconnecting clients is in Wi-Fi Control, which is admin-only
+    const controlLink = el('a', 'live-link', 'Disconnect clients in Wi-Fi Control →');
+    controlLink.href = '/wifi/';
+    controlLink.hidden = true;
+    liveBar.append(liveRateLabel, liveUpdated, controlLink);
+    const liveBody = el('div');
+    liveEl.append(liveBar, liveBody);
+    liveEl.hidden = true;
+
+    function clearLive() {
+        stopWifi();
+        liveBody.replaceChildren();
+        liveEl.hidden = true;
+    }
+
+    // The latest poll says what kind of live state a device has; devices that
+    // aren't polled return 404
     function fetchLive(ip) {
         fetch(`${base}/api/metrics?ip=${encodeURIComponent(ip)}`)
             .then(res => (res.ok ? res.json() : null))
-            .then(m => { if (ip === currentIP) renderLive(m); })
+            .then(m => {
+                if (ip !== currentIP) return;
+                if (m && m.wifi) startWifi(ip);
+                else if (m && m.printer) renderPrinter(m);
+                else clearLive();
+            })
             .catch(err => console.error('Live metrics fetch failed', err));
     }
 
-    // Live state from the latest poll: Wi-Fi radios and clients, or printer
-    // supplies. Names come from the network, so all text goes in through textContent.
-    function renderLive(m) {
-        if (!m || (!m.wifi && !m.printer)) {
-            liveEl.replaceChildren();
-            return;
-        }
+    function renderPrinter(m) {
         const at = new Date(m.collected_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-        liveEl.replaceChildren(...(m.wifi ? wifiSections(m.wifi, at) : printerSections(m.printer, at)));
+        liveBar.hidden = true;
+        liveBody.replaceChildren(...printerSections(m.printer, at));
+        liveEl.hidden = false;
+    }
+
+    // ---- live Wi-Fi --------------------------------------------------------
+    // Throughput is the change in a byte counter between two reads; each
+    // client and radio keeps about 5 minutes of samples for its sparklines.
+
+    const WIFI_KEEP_MS = 5 * 60e3;
+    let wifiIP = '';
+    let wifiTimer = null;
+    let wifiSeq = 0; // only the newest request's answer is drawn
+    let wifiPrev = null; // last snapshot, for rates
+    let wifiHist = new Map(); // mac or "radio-N" -> [{t, snr, mbps}]
+
+    function startWifi(ip) {
+        if (wifiIP === ip) return;
+        stopWifi();
+        wifiIP = ip;
+        liveBar.hidden = false;
+        liveUpdated.textContent = 'Reading the AP…';
+        scheduleWifi(0);
+    }
+
+    function stopWifi() {
+        clearTimeout(wifiTimer);
+        wifiSeq++; // a reply still on its way is ignored and schedules nothing
+        wifiIP = '';
+        wifiPrev = null;
+        wifiHist = new Map();
+    }
+
+    function scheduleWifi(delay) {
+        clearTimeout(wifiTimer);
+        const every = Number(liveRate.value) * 1000;
+        if (!wifiIP || !dialog.open || document.hidden || !every) return;
+        wifiTimer = setTimeout(pollWifi, delay === undefined ? every : delay);
+    }
+
+    function pollWifi() {
+        const ip = wifiIP, seq = ++wifiSeq;
+        fetch(`${base}/api/live?ip=${encodeURIComponent(ip)}`)
+            .then(res => res.json().then(body => ({ ok: res.ok, body })))
+            .then(({ ok, body }) => {
+                if (seq !== wifiSeq || ip !== wifiIP) return;
+                if (ok) renderWifi(body);
+                else liveUpdated.textContent = body.error || 'Could not read the AP';
+            })
+            .catch(err => {
+                if (seq === wifiSeq) liveUpdated.textContent = 'Could not read the AP';
+                console.error('Live Wi-Fi fetch failed', err);
+            })
+            .finally(() => { if (seq === wifiSeq) scheduleWifi(); });
+    }
+
+    // Mbps between two readings of a byte counter; null when there's no
+    // earlier reading or the counter went backwards (client reconnected)
+    function mbps(prev, cur, secs) {
+        if (prev === undefined || cur < prev || secs <= 0) return null;
+        return (cur - prev) * 8 / secs / 1e6;
+    }
+
+    function remember(key, t, sample) {
+        const list = wifiHist.get(key) || [];
+        list.push(Object.assign({ t }, sample));
+        while (list.length && t - list[0].t > WIFI_KEEP_MS) list.shift();
+        wifiHist.set(key, list);
+        return list;
+    }
+
+    function renderWifi(snap) {
+        const t = Date.parse(snap.at);
+        // Viewers share reads for a moment, so the same snapshot can come back
+        if (wifiPrev && t === wifiPrev.t) return;
+        const secs = wifiPrev ? (t - wifiPrev.t) / 1000 : 0;
+        const prev = wifiPrev || { radios: new Map(), clients: new Map() };
+        const wifi = snap.wifi;
+
+        const radios = liveTable(
+            ['Radio', 'Throughput', 'Clients', 'Channel', 'Width', 'Noise', 'Airtime', 'Tx power'],
+            wifi.radios.map(r => {
+                const p = prev.radios.get(r.index) || {};
+                const total = sum(mbps(p.tx, r.tx_bytes, secs), mbps(p.rx, r.rx_bytes, secs));
+                const hist = remember(`radio-${r.index}`, t, { mbps: total });
+                return [r.band, { node: metric(total === null ? '…' : `${fmtMbps(total)} Mbps`, hist.map(h => h.mbps)) },
+                    r.clients, r.channel, `${r.width_mhz} MHz`, `${r.noise_dbm} dBm`, `${r.airtime_pct}%`, `${r.tx_power_dbm} dBm`];
+            }));
+
+        const seen = new Set();
+        const clients = wifi.clients.slice()
+            .sort((a, b) => (a.name || a.ip || a.mac).localeCompare(b.name || b.ip || b.mac));
+        const clientTable = liveTable(
+            ['Client', 'Signal (SNR)', 'Throughput', 'Rate', 'SSID', 'Band', 'Mode', 'IP', 'MAC', 'Vendor'],
+            clients.map(c => {
+                seen.add(c.mac);
+                const p = prev.clients.get(c.mac) || {};
+                const total = sum(mbps(p.tx, c.tx_bytes, secs), mbps(p.rx, c.rx_bytes, secs));
+                const hist = remember(c.mac, t, { snr: c.snr_db, mbps: total });
+                const weak = c.snr_db < WEAK_SNR_DB;
+                return [c.name || '—',
+                    { node: metric(`${c.snr_db} dB`, hist.map(h => h.snr), { weak, weakBelow: WEAK_SNR_DB }) },
+                    { node: metric(total === null ? '…' : `${fmtMbps(total)} Mbps`, hist.map(h => h.mbps)) },
+                    `${formatNum(c.rate_mbps, 0)} Mbps`, c.ssid, c.band, c.mode, c.ip, c.mac, c.vendor];
+            }));
+        // A client that left starts a fresh history if it comes back
+        for (const key of wifiHist.keys()) {
+            if (!key.startsWith('radio-') && !seen.has(key)) wifiHist.delete(key);
+        }
+
+        liveBody.replaceChildren(
+            liveSection('Radios', '', radios),
+            liveSection(`Connected clients (${clients.length})`,
+                `SNR below ${WEAK_SNR_DB} dB is marked · lines show the last 5 minutes`, clientTable));
+        liveUpdated.textContent = `Updated ${new Date(t).toLocaleTimeString()}`;
+        controlLink.hidden = !snap.can_control;
+        liveEl.hidden = false;
+
+        wifiPrev = {
+            t,
+            radios: new Map(wifi.radios.map(r => [r.index, { tx: r.tx_bytes, rx: r.rx_bytes }])),
+            clients: new Map(wifi.clients.map(c => [c.mac, { tx: c.tx_bytes, rx: c.rx_bytes }])),
+        };
+    }
+
+    function sum(a, b) {
+        return a === null || b === null ? null : a + b;
+    }
+
+    function fmtMbps(v) {
+        return formatNum(v, v < 10 ? 2 : 1);
+    }
+
+    function metric(text, values, opts) {
+        const o = opts || {};
+        const d = el('div', 'metric');
+        d.append(el('span', 'num' + (o.weak ? ' weak' : ''), text), sparkline(values, o.weakBelow));
+        return d;
+    }
+
+    // A small line of recent values, newest at the right; nulls (no rate yet)
+    // break it. It turns red when the latest value is under weakBelow.
+    function sparkline(values, weakBelow) {
+        const W = 90, H = 22;
+        const svg = svgEl('svg', { class: 'spark', viewBox: `0 0 ${W} ${H}`, 'aria-hidden': 'true' });
+        const nums = values.filter(v => v !== null && v !== undefined);
+        if (nums.length < 2) return svg;
+        const hi = Math.max(...nums, weakBelow !== undefined ? weakBelow : 0) || 1;
+        const step = W / (values.length - 1);
+        let d = '', pen = false;
+        values.forEach((v, i) => {
+            if (v === null || v === undefined) { pen = false; return; }
+            d += `${pen ? 'L' : 'M'}${(i * step).toFixed(1)},${(H - 1 - v / hi * (H - 2)).toFixed(1)}`;
+            pen = true;
+        });
+        const weak = weakBelow !== undefined && nums[nums.length - 1] < weakBelow;
+        svg.appendChild(svgEl('path', { d, class: weak ? 'weak' : '' }));
+        return svg;
     }
 
     function printerSections(p, at) {
@@ -161,29 +353,6 @@
         return [
             liveSection(`Status: ${p.status || 'Unknown'}`, status, supplies),
             liveSection('Paper trays', '', trays),
-        ];
-    }
-
-    function wifiSections(wifi, at) {
-        const radios = liveTable(
-            ['Radio', 'Channel', 'Width', 'Tx power', 'Noise', 'Airtime', 'Clients'],
-            wifi.radios.map(r => [r.band, r.channel, `${r.width_mhz} MHz`, `${r.tx_power_dbm} dBm`,
-                `${r.noise_dbm} dBm`, `${r.airtime_pct}%`, r.clients]));
-        const clients = wifi.clients.slice()
-            .sort((a, b) => (a.name || a.ip).localeCompare(b.name || b.ip));
-        const clientTable = liveTable(
-            ['Client', 'IP', 'MAC', 'SSID', 'Band', 'Mode', 'SNR', 'Rate', 'Vendor'],
-            clients.map(c => [c.name || '—', c.ip, c.mac, c.ssid, c.band, c.mode,
-                { text: `${c.snr_db} dB`, cls: c.snr_db < WEAK_SNR_DB ? 'weak' : '' },
-                `${formatNum(c.rate_mbps, 0)} Mbps`, c.vendor]));
-        // Wi-Fi Control (admins only) has the seconds-by-seconds view and can
-        // disconnect clients; this app only reads
-        const link = el('a', 'live-link', 'Live view and disconnect clients in Wi-Fi Control →');
-        link.href = '/wifi/';
-        return [
-            liveSection('Radios', `as of ${at}`, radios),
-            liveSection(`Connected clients (${clients.length})`, `SNR below ${WEAK_SNR_DB} dB is marked`, clientTable),
-            link,
         ];
     }
 
@@ -205,6 +374,12 @@
             const tr = el('tr');
             r.forEach(v => {
                 const cell = v !== null && typeof v === 'object' ? v : { text: v };
+                if (cell.node) {
+                    const td = el('td', cell.cls || '');
+                    td.appendChild(cell.node);
+                    tr.appendChild(td);
+                    return;
+                }
                 tr.appendChild(el('td', cell.cls || '', String(cell.text === undefined ? '' : cell.text)));
             });
             table.appendChild(tr);
@@ -676,7 +851,25 @@
     document.getElementById('historyClose').addEventListener('click', () => dialog.close());
     // Content sits in .dialog-body, so a click on the dialog itself is the backdrop
     dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
-    dialog.addEventListener('close', () => clearTimeout(refreshTimer));
+    dialog.addEventListener('close', () => {
+        clearTimeout(refreshTimer);
+        stopWifi(); // reopening starts a fresh live view
+    });
+
+    liveRate.addEventListener('change', () => {
+        save('snmpLiveRate', liveRate.value);
+        wifiPrev = null; // a paused gap shouldn't count as one slow sample
+        scheduleWifi(0);
+    });
+    // Stop reading the AP while the tab is in the background
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            clearTimeout(wifiTimer);
+        } else if (wifiIP) {
+            wifiPrev = null;
+            scheduleWifi(0);
+        }
+    });
 
     let resizeTimer = null;
     window.addEventListener('resize', () => {

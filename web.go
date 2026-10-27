@@ -73,6 +73,7 @@ func StartWebServer(config *Config) error {
 	http.HandleFunc("/api/scan-status", handleAPIScanStatus)
 	http.HandleFunc("/api/metrics", handleAPIMetrics)
 	http.HandleFunc("/api/metrics/history", handleAPIMetricsHistory)
+	http.HandleFunc("/api/live", handleAPILive(config))
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	http.HandleFunc("/health", handleHealth)
 	http.HandleFunc("/snmp/health", handleHealth)
