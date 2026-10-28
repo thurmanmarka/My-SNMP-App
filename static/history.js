@@ -15,6 +15,7 @@
     const titleEl = document.getElementById('historyTitle');
     const subEl = document.getElementById('historySub');
     const rangeGroup = document.getElementById('historyRange');
+    const tempUnitGroup = document.getElementById('tempUnit');
     const statusEl = document.getElementById('historyStatus');
     const grid = document.getElementById('historyCharts');
     const liveEl = document.getElementById('historyLive');
@@ -45,6 +46,7 @@
 
     let currentIP = '';
     let currentRange = load('snmpHistoryRange', '24h');
+    let tempUnit = load('snmpTempUnit', 'F') === 'C' ? 'C' : 'F'; // temperatures are stored in °C
     let lastData = null;
     let refreshTimer = null;
 
@@ -388,12 +390,23 @@
         return wrap;
     }
 
+    // Converts a °C point, including an hourly point's max
+    function toFahrenheit(p) {
+        const f = c => c * 9 / 5 + 32;
+        const out = { t: p.t, v: f(p.v) };
+        if (p.max !== undefined) out.max = f(p.max);
+        if (p.min !== undefined) out.min = f(p.min);
+        return out;
+    }
+
     function seriesFrom(map, filter) {
         return Object.keys(map || {}).filter(filter || (() => true)).sort().map(name => ({ name, points: map[name] }));
     }
 
     function renderAll() {
         const d = lastData;
+        // The °F/°C switch only means something when there's a temperature chart
+        tempUnitGroup.hidden = !(d && Object.keys(d.temps || {}).length);
         const specs = d ? chartSpecs(d) : [];
         if (!specs.length) {
             specs.push({ key: 'empty', wide: true, empty: d ? 'No data in this range' : 'No history for this device' });
@@ -434,11 +447,13 @@
             });
         }
 
-        const temps = seriesFrom(d.temps);
+        // Stored in °C, as devices report it; shown in the unit picked with the switch
+        let temps = seriesFrom(d.temps);
+        if (tempUnit === 'F') temps = temps.map(s => ({ name: s.name, points: s.points.map(toFahrenheit) }));
         if (temps.length) {
             specs.push({
-                key: 'temp', title: 'Temperature', sub: '°C per sensor',
-                series: temps, nameSeries: true, unit: '°C', decimals: 1, hourly, win,
+                key: 'temp', title: 'Temperature', sub: `°${tempUnit} per sensor`,
+                series: temps, nameSeries: true, unit: `°${tempUnit}`, decimals: 1, hourly, win,
             });
         }
 
@@ -848,6 +863,22 @@
         fetchHistory();
     });
 
+    function markTempUnit() {
+        tempUnitGroup.querySelectorAll('button').forEach(b => {
+            b.setAttribute('aria-pressed', b.dataset.unit === tempUnit ? 'true' : 'false');
+        });
+    }
+
+    // Switching units redraws from the data already loaded
+    tempUnitGroup.addEventListener('click', e => {
+        const b = e.target.closest('button[data-unit]');
+        if (!b || b.dataset.unit === tempUnit) return;
+        tempUnit = b.dataset.unit;
+        save('snmpTempUnit', tempUnit);
+        markTempUnit();
+        if (lastData) renderAll();
+    });
+
     document.getElementById('historyClose').addEventListener('click', () => dialog.close());
     // Content sits in .dialog-body, so a click on the dialog itself is the backdrop
     dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
@@ -879,4 +910,5 @@
 
     // Colours are CSS variables, so the theme toggle restyles the charts without a re-render
     markRange();
+    markTempUnit();
 })();

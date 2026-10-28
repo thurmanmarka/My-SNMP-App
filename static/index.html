@@ -461,6 +461,7 @@
             cursor: pointer;
         }
 
+        .range-group[hidden] { display: none; }
         .range-group button:last-child { border-right: none; }
         .range-group button:hover { color: var(--text-main); background: var(--accent-soft); }
         .range-group button[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
@@ -655,6 +656,10 @@
                         <button type="button" data-range="30d">30d</button>
                         <button type="button" data-range="90d">90d</button>
                         <button type="button" data-range="1y">1y</button>
+                    </div>
+                    <div class="range-group" role="group" aria-label="Temperature unit" id="tempUnit" hidden>
+                        <button type="button" data-unit="F">°F</button>
+                        <button type="button" data-unit="C">°C</button>
                     </div>
                     <span class="history-status" id="historyStatus"></span>
                 </div>
