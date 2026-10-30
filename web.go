@@ -182,11 +182,20 @@ func runScan(config *Config) {
 		}
 	}
 
-	results, err := ScanSubnet(
-		config.Network.Subnet,
-		config.GetPingTimeout(),
-		config.Network.PingWorkers,
-	)
+	var results []ScanResult
+	var err error
+	subnets := config.GetSubnets()
+	if len(subnets) == 0 {
+		err = fmt.Errorf("no subnets configured")
+	}
+	for _, subnet := range subnets {
+		var subnetResults []ScanResult
+		subnetResults, err = ScanSubnet(subnet, config.GetPingTimeout(), config.Network.PingWorkers)
+		if err != nil {
+			break
+		}
+		results = append(results, subnetResults...)
+	}
 	if err != nil {
 		scanStatusMutex.Lock()
 		scanStatus.Running = false

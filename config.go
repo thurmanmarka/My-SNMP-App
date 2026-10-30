@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -30,9 +31,11 @@ type Config struct {
 	} `yaml:"database"`
 
 	Network struct {
-		Subnet      string `yaml:"subnet"`
-		PingTimeout int    `yaml:"ping_timeout"`
-		PingWorkers int    `yaml:"ping_workers"`
+		// Subnet and Subnets are combined; Subnet is kept for older configs
+		Subnet      string   `yaml:"subnet"`
+		Subnets     []string `yaml:"subnets"`
+		PingTimeout int      `yaml:"ping_timeout"`
+		PingWorkers int      `yaml:"ping_workers"`
 	} `yaml:"network"`
 
 	SNMP struct {
@@ -195,6 +198,21 @@ func (db *DeviceDatabase) MergeDevice(device Device) {
 
 	// New device, add to database
 	db.Devices = append(db.Devices, device)
+}
+
+// GetSubnets returns every configured subnet (subnet + subnets), de-duplicated
+func (c *Config) GetSubnets() []string {
+	var subnets []string
+	seen := map[string]bool{}
+	for _, s := range append([]string{c.Network.Subnet}, c.Network.Subnets...) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		subnets = append(subnets, s)
+	}
+	return subnets
 }
 
 // GetPingTimeout returns ping timeout as duration
